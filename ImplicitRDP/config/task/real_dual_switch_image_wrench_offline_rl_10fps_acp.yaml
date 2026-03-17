@@ -79,7 +79,7 @@ rl_shape_meta:
     shape: [19] # (3+6 + 3+6 + 1)
 
 env_runner:
-  _target_: reactive_diffusion_policy.env_runner.real_stable_reactive_runner.RealStableReactiveRunner
+  _target_: ImplicitRDP.env_runner.real_stable_reactive_runner.RealStableReactiveRunner
   eval_episodes: 200
   max_duration_time: 400
   tcp_action_update_interval: 6
@@ -146,7 +146,7 @@ env_runner:
     debug: False
 
 dataset:
-  _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset.RealImageTactileRLDataset
+  _target_: ImplicitRDP.dataset.real_image_tactile_dataset.RealImageTactileRLDataset
   shape_meta: ${task.shape_meta}
   dataset_path: ${task.dataset_path}
   horizon: ${horizon}

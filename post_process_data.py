@@ -90,8 +90,8 @@ if __name__ == '__main__':
     DRAW_FORCE = False  # for debugging force
     USE_ABSOLUTE_ACTION = True
 
-    data_dir = f'/home/wendi/Desktop/ImplicitRDP/data/{TAG}'
-    save_data_dir = f'/home/wendi/Desktop/ImplicitRDP/data/{TAG}'
+    data_dir = f'/mnt/data/users/lifeng/{TAG}'
+    save_data_dir = f'/mnt/data/users/lifeng/{TAG}'
     if TEMPORAL_DOWNSAMPLE_RATIO > 1:
         save_data_dir += f'_downsample{TEMPORAL_DOWNSAMPLE_RATIO}'
     if DEBUG:

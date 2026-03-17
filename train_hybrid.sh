@@ -2,7 +2,7 @@
 
 #--------------------------------
 # Config
-GPU_ID=1
+GPU_ID=0
 
 TASK="dual_switch"
 DATASET_VERSION="v3"
@@ -27,7 +27,7 @@ DATASET_RESUME_PARAMS_PATH="null"
 if [ ${ROUND} -le 1 ]; then
     echo "Training offline RL"
     RL_TYPE="offline"
-    DATASET_PATH="/mnt/data/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr"
+    DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr"
     TASK_CONFIG="real_${TASK}_image_wrench_offline_rl_10fps_acp"
     POLICY_NUM_EPOCHS=600
     REWARD_NUM_EPOCHS=200
@@ -38,7 +38,7 @@ if [ ${ROUND} -le 1 ]; then
 else
     echo "Training online RL"
     RL_TYPE="online"
-    DATASET_PATH="/mnt/data/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr"
+    DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr"
     TASK_CONFIG="real_${TASK}_image_wrench_online_rl_10fps_acp"
     POLICY_NUM_EPOCHS=200
     REWARD_NUM_EPOCHS=200
@@ -55,8 +55,8 @@ echo "Stage 0: post-processing data..."
 if [ ${ROUND} -gt 1 ]; then
     echo "Create soft link of every data in the last dataset directory to the new dataset directory..."
     # find the last dataset directory
-    LAST_RAW_DATASET_DIR="/mnt/data/lifeng/${TASK}_${DATASET_VERSION}_round_$((${ROUND}-1))"
-    RAW_DATASET_DIR="/mnt/data/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}"
+    LAST_RAW_DATASET_DIR="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_$((${ROUND}-1))"
+    RAW_DATASET_DIR="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}"
     # create soft link of every data in the last dataset directory to the new dataset directory
     for data_file in $(find ${LAST_RAW_DATASET_DIR} \( -type f -o -type l \) -name "*.pkl"); do
         ln -sf $(realpath ${data_file}) ${RAW_DATASET_DIR}/${data_file##*/}
@@ -77,7 +77,7 @@ if [ "${POLICY_TYPE}" = "hybrid" ]; then
     POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_hybrid_policy_round_${ROUND}
 elif [ "${POLICY_TYPE}" = "diffusion" ]; then
     echo "Using Diffusion Policy..."
-    CONFIG_NAME="train_diffusion_reactive_transformer_rnn_nsca_real_image_original_dataset_workspace"
+    CONFIG_NAME="train_reactive_diffusion_transformer_real_image_workspace"
 elif [ "${POLICY_TYPE}" = "act_confidence" ]; then
     echo "Using ACT + Confidence Policy..."
     CONFIG_NAME="train_act_confidence_workspace"
@@ -98,9 +98,6 @@ COMMON_TRAIN_ARGS=(
     task.name=${POLICY_TASK_NAME}
     policy.use_amp_for_inference=${USE_AMP_FOR_POLICY}
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY}
-    ++policy.obs_drop_type=gaussian
-    ++policy.gaussian_start=20
-    ++policy.obs_drop_keys=['right_wrist_img']
     task.dataset.resume_params_path=${DATASET_RESUME_PARAMS_PATH}
     task.dataset.use_noisy_episodes=True
     task.dataset.only_use_success_episodes=True
@@ -141,57 +138,3 @@ if [ ! -f "${DATASET_RESUME_PARAMS_PATH}" ]; then
     exit 1
 fi
 echo "Using dataset resume params at ${DATASET_RESUME_PARAMS_PATH}"
-
-# Stage 2: Train Reward Model
-echo ""
-echo "Stage 2: training Reward Model..."
-REWARD_TASK_NAME=${TASK}_${DATASET_VERSION}_reward_round_${ROUND}
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
-    --config-name=train_desired_force_reward_real_image_workspace \
-    task=${TASK_CONFIG} \
-    task.dataset_path=${DATASET_PATH} \
-    task.name=${REWARD_TASK_NAME} \
-    task.dataset.resume_params_path=${DATASET_RESUME_PARAMS_PATH} \
-    task.dataset.only_use_human_data=True \
-    training.num_epochs=${REWARD_NUM_EPOCHS} \
-    training.pretrained_ckpt_path=${REWARD_PRETRAINED_CKPT_PATH} \
-    training.debug=${TRAINING_DEBUG} \
-    optimizer.lr=${REWARD_LR} \
-    policy_ckpt_path=${POLICY_CKPT_PATH} \
-    logging.mode=${LOGGING_MODE}
-
-# find the latest reward checkpoint
-echo ""
-echo "Searching for the latest reward checkpoint..."
-REWARD_CKPT_PATH=$(find "${SEARCH_PATH}" -maxdepth 2 -path "*${REWARD_TASK_NAME}*" -type d)/checkpoints/latest.ckpt
-
-if [ ! -f "${REWARD_CKPT_PATH}" ]; then
-    echo "Error: Reward checkpoint not found at ${REWARD_CKPT_PATH}"
-    exit 1
-fi
-echo "Found reward checkpoint at ${REWARD_CKPT_PATH}"
-
-# Stage 3: Train Critic Model
-echo ""
-echo "Stage 3: training Critic Model..."
-CRITIC_TASK_NAME=${TASK}_${DATASET_VERSION}_critic_round_${ROUND}
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
-    --config-name=train_diffusion_reactive_transformer_small_rnn_nsca_desired_force_reward_critic_real_image_workspace \
-    task=${TASK_CONFIG} \
-    task.dataset_path=${DATASET_PATH} \
-    task.name=${CRITIC_TASK_NAME} \
-    task.dataset.resume_params_path=${DATASET_RESUME_PARAMS_PATH} \
-    task.dataset.random_append_obs=True \
-    task.dataset.use_noisy_episodes=True \
-    policy.noise_scheduler.prediction_type=v_prediction \
-    policy.use_amp_for_inference=${USE_AMP_FOR_POLICY} \
-    policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
-    training.num_epochs=${CRITIC_NUM_EPOCHS} \
-    training.pretrained_ckpt_path=${CRITIC_PRETRAINED_CKPT_PATH} \
-    training.debug=${TRAINING_DEBUG} \
-    optimizer.lr=${CRITIC_LR} \
-    reward_ckpt_path=${REWARD_CKPT_PATH} \
-    policy_ckpt_path=${POLICY_CKPT_PATH} \
-    logging.mode=${LOGGING_MODE}
-
-echo "Finished training policy, reward, and critic for round ${ROUND}. Exiting..."

@@ -12,14 +12,9 @@ from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.model.act.act_transformer import ACTTransformer
 from ImplicitRDP.model.confidence.transformer import TransformerConfidenceHead
 from ImplicitRDP.model.force.rnn import RNN
-from ImplicitRDP.model.force.force_encoder import ForceEncoder
-from ImplicitRDP.model.vector_quantize_pytorch.residual_vq import ResidualVQ
-from ImplicitRDP.policy.curriculum_utils import get_scale, gaussian_2d_smoothing_separate
 
 
 class ACTConfidencePolicy(BaseImagePolicy):
-    """A pure ACT policy with optional confidence head (no diffusion branch)."""
-
     def __init__(self,
                  shape_meta: dict,
                  act_model: ACTTransformer,
@@ -27,29 +22,10 @@ class ACTConfidencePolicy(BaseImagePolicy):
                  horizon: int,
                  n_action_steps: int,
                  n_obs_steps: int,
-                 input_pertub: float = 0.0,
-                 obs_drop: float = 0.0,
-                 obs_drop_schedule_type: str = "linear",
-                 obs_drop_keys: Optional[List[str]] = None,
-                 obs_drop_type: str = 'zero',
-                 obs_drop_noise_scale: float = 1.0,
-                 sca_drop: float = 0.0,
-                 gaussian_start: float = 10.0,
-                 gaussian_end: float = 0.0,
-                 gaussian_ratio: float = 2 / 3,
                  n_emb: int = 768,
                  use_rnn_obs_encoder: bool = False,
                  rnn_obs_encoder_n_layer: int = 1,
                  rnn_obs_encoder_hidden_dim: int = 512,
-                 use_force_encoder: bool = False,
-                 force_encoder_hidden_dims: Optional[List[int]] = None,
-                 force_encoder_output_dim: int = 128,
-                 use_vq: bool = False,
-                 vq_num_quantizers: int = 2,
-                 vq_codebook_size: int = 32,
-                 vq_quantize_dropout: bool = False,
-                 vq_ema_update: bool = True,
-                 vq_learnable_codebook: bool = False,
                  use_amp_for_inference: bool = False,
                  amp_dtype: torch.dtype = torch.float16,
                  confidence_hidden_dim: Optional[int] = None,
@@ -74,7 +50,6 @@ class ACTConfidencePolicy(BaseImagePolicy):
         self.action_horizon = horizon
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
-        self.input_pertub = input_pertub
 
         self.shape_meta = shape_meta
         self.obs_encoder = obs_encoder
@@ -82,15 +57,6 @@ class ACTConfidencePolicy(BaseImagePolicy):
         self.normalizer = LinearNormalizer()
         self.kwargs = kwargs
 
-        self.obs_drop = obs_drop
-        self.obs_drop_schedule_type = obs_drop_schedule_type
-        self.obs_drop_keys = [] if obs_drop_keys is None else obs_drop_keys
-        self.obs_drop_type = obs_drop_type
-        self.obs_drop_noise_scale = obs_drop_noise_scale
-        self.sca_drop = sca_drop
-        self.gaussian_start = gaussian_start
-        self.gaussian_end = gaussian_end
-        self.gaussian_ratio = gaussian_ratio
         self.n_emb = n_emb
         self.use_amp_for_inference = use_amp_for_inference
         self.amp_dtype = amp_dtype if use_amp_for_inference else None
@@ -100,35 +66,6 @@ class ACTConfidencePolicy(BaseImagePolicy):
         self.extented_obs_keys = sorted(all_extented_obs_keys)
         temporal_cond_dim = sum([shape_meta['extended_obs'][extented_obs_key]['shape'][-1]
                                  for extented_obs_key in self.extented_obs_keys])
-
-        self.wrench_stack_obs_keys = []
-        self.force_encoder = None
-        if use_force_encoder:
-            force_encoder_hidden_dims = force_encoder_hidden_dims or [32, 64, 128]
-            if len(self.extented_obs_keys) != 0:
-                assert all(["wrench_stack" in key for key in self.extented_obs_keys]), \
-                    "Force encoder requires extended_obs only contains wrench_stack"
-                input_dim = temporal_cond_dim
-                key_in_obs_count = 0
-                for extented_obs_key in self.extented_obs_keys:
-                    if extented_obs_key in shape_meta['obs']:
-                        key_in_obs_count += 1
-                assert key_in_obs_count == 0 or key_in_obs_count == len(self.extented_obs_keys), \
-                    "All wrench_stack keys in extended_obs must exist in obs or not exist in obs"
-                if key_in_obs_count == len(self.extented_obs_keys):
-                    self.wrench_stack_obs_keys = self.extented_obs_keys
-            else:
-                obs_keys = list(shape_meta['obs'].keys())
-                all_wrench_stack_obs_keys = [key for key in obs_keys if 'wrench_stack' in key]
-                input_dim = sum([shape_meta['obs'][key]['shape'][-1] for key in all_wrench_stack_obs_keys])
-                self.wrench_stack_obs_keys = sorted(all_wrench_stack_obs_keys)
-
-            self.force_encoder = ForceEncoder(
-                input_dim=input_dim,
-                output_dim=force_encoder_output_dim,
-                hidden_dims=force_encoder_hidden_dims
-            )
-            temporal_cond_dim = force_encoder_output_dim
 
         self.rnn_obs_encoder = None
         if use_rnn_obs_encoder:
@@ -140,17 +77,6 @@ class ACTConfidencePolicy(BaseImagePolicy):
                 n_emb=n_emb,
             )
 
-        self.vq = None
-        if use_vq:
-            assert self.rnn_obs_encoder is not None, "VQ is only used when using RNNObsEncoder"
-            self.vq = ResidualVQ(
-                dim=n_emb,
-                num_quantizers=vq_num_quantizers,
-                codebook_size=vq_codebook_size,
-                quantize_dropout=vq_quantize_dropout,
-                ema_update=vq_ema_update,
-                learnable_codebook=vq_learnable_codebook,
-            )
 
         self.confidence_gamma = confidence_gamma
         self.confidence_alpha = confidence_alpha
@@ -245,23 +171,8 @@ class ACTConfidencePolicy(BaseImagePolicy):
 
         temporal_cond = torch.cat(temporal_cond, dim=-1)
         if post_process:
-            processed_cond = temporal_cond
-
-            if self.force_encoder is not None and len(self.wrench_stack_obs_keys) == 0:
-                B, T, _ = processed_cond.shape
-                processed_cond_4d = processed_cond.unsqueeze(1)
-                processed_cond = self.force_encoder(processed_cond_4d)
-                processed_cond = processed_cond.squeeze(1)
-                processed_cond = processed_cond.unsqueeze(1).expand(B, T, -1)
-
             if self.rnn_obs_encoder is not None:
-                processed_cond = self.rnn_obs_encoder(processed_cond)
-                if self.vq is not None:
-                    processed_cond, _, _ = self.vq(processed_cond)
-            else:
-                assert self.vq is None, "VQ is only used when using RNNObsEncoder"
-
-            temporal_cond = processed_cond
+                temporal_cond = self.rnn_obs_encoder(temporal_cond)
 
         return temporal_cond
 
@@ -280,17 +191,6 @@ class ACTConfidencePolicy(BaseImagePolicy):
         nobs = self.normalizer.normalize(obs_dict)
         B = next(iter(nobs.values())).shape[0]
         this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-
-        if self.force_encoder is not None and self.wrench_stack_obs_keys:
-            wrench_stack_cond = []
-            for wrench_stack_obs_key in self.wrench_stack_obs_keys:
-                wrench_stack_obs = this_nobs[wrench_stack_obs_key]
-                wrench_stack_cond.append(wrench_stack_obs)
-            wrench_stack_cond = torch.cat(wrench_stack_cond, dim=-1)
-            wrench_stack_cond = wrench_stack_cond.reshape(B, -1, *wrench_stack_cond.shape[1:])
-            force_emb = self.force_encoder(wrench_stack_cond)
-            force_emb = force_emb.reshape(-1, *force_emb.shape[2:])
-            this_nobs["force_emb"] = force_emb
 
         obs_tokens = self.obs_encoder(this_nobs)
         if len(obs_tokens.shape) == 2:
@@ -536,49 +436,6 @@ class ACTConfidencePolicy(BaseImagePolicy):
     # ------------------------------------------------------------------
     # Training helpers
     # ------------------------------------------------------------------
-    def apply_obs_drop(self, batch):
-        if self.obs_drop_type == "gaussian":
-            obs_drop_scale = get_scale(
-                scheduler=self.obs_drop_schedule_type,
-                start=self.gaussian_start,
-                end=self.gaussian_end,
-                cur_step=self.progress,
-                max_step=1,
-                ratio=self.gaussian_ratio
-            )
-        else:
-            if self.obs_drop_schedule_type == "constant":
-                obs_drop_scale = 1
-            elif self.obs_drop_schedule_type == "linear":
-                obs_drop_scale = self.progress
-            else:
-                raise ValueError(f"Unsupported obs_drop_schedule_type {self.obs_drop_schedule_type}")
-            obs_drop = self.obs_drop * obs_drop_scale
-
-        if self.obs_drop_type == "gaussian" or (self.obs_drop > 0.0 and obs_drop_scale > 0.0):
-            for key in self.obs_drop_keys:
-                batch_size = next(iter(batch['obs'].values())).shape[0]
-                if key in batch['obs']:
-                    if self.obs_drop_type == 'gaussian':
-                        assert len(batch['obs'][key].shape) == 5, "Gaussian dropout only supports 5D obs"
-                        batch['obs'][key] = gaussian_2d_smoothing_separate(batch['obs'][key], scale=obs_drop_scale)
-                    else:
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        if self.obs_drop_type == 'zero':
-                            batch['obs'][key][drop_obs_mask] = 0.0
-                        elif self.obs_drop_type == 'learnable':
-                            raise NotImplementedError("learnable obs_drop_type is not yet implemented")
-                        elif self.obs_drop_type == 'noise':
-                            batch['obs'][key][drop_obs_mask] = self.obs_drop_noise_scale * torch.randn_like(batch['obs'][key][drop_obs_mask])
-
-                if 'extended_obs' in batch and key in batch['extended_obs']:
-                    if self.obs_drop_type == 'zero':
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        batch['extended_obs'][key][drop_obs_mask] = 0.0
-                    elif self.obs_drop_type == 'noise':
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        batch['extended_obs'][key][drop_obs_mask] = self.obs_drop_noise_scale * torch.randn_like(batch['extended_obs'][key][drop_obs_mask])
-
     def _compute_act_loss(self,
                           action: torch.Tensor,
                           obs_tokens: torch.Tensor,
@@ -667,8 +524,6 @@ class ACTConfidencePolicy(BaseImagePolicy):
         action = batch['action']
         T_action = action.shape[1]
 
-        self.apply_obs_drop(batch)
-
         obs_dict = batch['obs']
         extended_obs_dict = batch.get('extended_obs', None)
 
@@ -747,18 +602,6 @@ class ACTConfidencePolicy(BaseImagePolicy):
 
         if self.rnn_obs_encoder is not None:
             optim_groups += self.rnn_obs_encoder.get_optim_groups(weight_decay=weight_decay)
-
-        if self.vq is not None:
-            optim_groups += [{
-                "params": self.vq.parameters(),
-                "weight_decay": 0.0,
-            }]
-
-        if self.force_encoder is not None:
-            optim_groups += [{
-                "params": self.force_encoder.parameters(),
-                "weight_decay": weight_decay,
-            }]
 
         if self.confidence_head is not None:
             if hasattr(self.confidence_head, 'get_optim_groups'):

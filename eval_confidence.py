@@ -10,12 +10,16 @@ import matplotlib.pyplot as plt
 from loguru import logger
 from omegaconf import OmegaConf
 import tqdm
+import json
 
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_policy import HybridDiffusionACTPolicy
+from ImplicitRDP.policy.hybrid_diffusion_act_stagewise_policy import HybridDiffusionACTStagewisePolicy
 from ImplicitRDP.policy.act_confidence_policy import ACTConfidencePolicy
 from ImplicitRDP.policy.act_confidence_dual_encoder_policy import ACTConfidenceDualEncoderPolicy
+from ImplicitRDP.policy.act_confidence_dual_encoder_stagewise_policy import ACTConfidenceDualEncoderStagewisePolicy
+from ImplicitRDP.policy.act_confidence_stagewise_policy import ACTConfidenceStagewisePolicy
 from ImplicitRDP.dataset.base_dataset import BaseImageDataset
 from ImplicitRDP.common.pytorch_util import dict_apply
 
@@ -24,15 +28,6 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 def denormalize_image(img_tensor):
-    """
-    Convert image tensor back to [0, 255] uint8 numpy array
-    
-    Args:
-        img_tensor: torch tensor of shape (C, H, W) or (H, W, C)
-    
-    Returns:
-        numpy array: BGR image in [0, 255] uint8
-    """
     img = img_tensor.cpu().numpy()
     
     # Process channel dimension
@@ -52,12 +47,8 @@ def denormalize_image(img_tensor):
     
     return img
 
-# Core evaluation functions
-
 def align_gt_pred(gt_action, pred_action, policy):
     """Align GT and prediction actions - remove 1 step offset (hack for training alignment)"""
-    # All policies seem to have this -1 offset based on policy code
-    # Remove the first step from GT to align with prediction
     if gt_action.shape[1] > pred_action.shape[1]:
         gt_action = gt_action[:, 1:1+pred_action.shape[1]]
 
@@ -69,7 +60,6 @@ def align_gt_pred(gt_action, pred_action, policy):
     return gt_action, pred_action
 
 def compute_errors(gt_action, pred_action, policy):
-    """Compute MSE, XYZ error, and RPY error"""
     # Align actions first
     gt_action, pred_action = align_gt_pred(gt_action, pred_action, policy)
 
@@ -95,19 +85,23 @@ def compute_errors(gt_action, pred_action, policy):
     return mse, error_xyz, error_rpy
 
 
-def create_simple_plot(data, title, ylabel, max_frames=200):
-    """Create a simple matplotlib plot"""
+def create_simple_plot(data, title, ylabel, max_frames=200, threshold_line=None):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(range(len(data[:max_frames])), data[:max_frames])
     ax.set_title(title)
     ax.set_xlabel('Frame')
     ax.set_ylabel(ylabel)
     ax.grid(True)
+    
+    # Add threshold line if provided
+    if threshold_line is not None:
+        ax.axhline(y=threshold_line, color='r', linestyle='--', linewidth=1.5, label=f'Threshold: {threshold_line}')
+        ax.legend(loc='upper right', fontsize=10)
+    
     plt.tight_layout()
     return fig
 
 def create_error_plot(error_data, title, max_frames=200):
-    """Create XYZ/RPY error plot"""
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     labels = ['X', 'Y', 'Z'] if 'Z' in title else ['Roll', 'Pitch', 'Yaw']
 
@@ -125,29 +119,58 @@ def create_error_plot(error_data, title, max_frames=200):
     return fig
 
 def fig_to_image(fig):
-    """Convert matplotlib figure to OpenCV image"""
     fig.canvas.draw()
-    try:
-        # Try the new method first
-        img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
-        img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
-        img = img[:, :, :3]  # Remove alpha channel
-    except AttributeError:
-        try:
-            # Fallback to tostring_argb
-            img = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
-            img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
-            img = img[:, :, 1:]  # Remove alpha, convert ARGB to RGB
-        except AttributeError:
-            # Final fallback - use buffer_rgba if available
-            img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
-            img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
-            img = img[:, :, :3]
+    img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+    img = img[:, :, :3]  # Remove alpha channel
     plt.close(fig)
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-def process_single_episode(policy, episode_data_list, has_confidence, device, output_dir, episode_idx, video_fps=10):
-    """Simplified episode processing - single frame at a time"""
+def _get_force_magnitude(force_arr: np.ndarray, metric: str = "norm") -> np.ndarray:
+    if force_arr.ndim != 2:
+        raise ValueError(f"force_arr must be 2D (n_frames, 6). Got shape {force_arr.shape}")
+    if force_arr.shape[1] < 6:
+        raise ValueError(f"force_arr must have 6 dims. Got shape {force_arr.shape}")
+
+    metric = metric.lower() if metric else "norm"
+    if metric in ("norm", "force"):
+        return np.linalg.norm(force_arr[:, :3], axis=1)
+    if metric == "torque":
+        return np.linalg.norm(force_arr[:, 3:], axis=1)
+    if metric in ("x", "y", "z"):
+        return force_arr[:, {"x": 0, "y": 1, "z": 2}[metric]]
+    if metric in ("rx", "ry", "rz"):
+        return force_arr[:, {"rx": 3, "ry": 4, "rz": 5}[metric]]
+    # default to force norm
+    return np.linalg.norm(force_arr[:, :3], axis=1)
+
+def create_force_plot(force_arr: np.ndarray, metric: str = "norm", title: str | None = None, max_frames: int = 200):
+    force_values = _get_force_magnitude(force_arr, metric=metric)
+    force_values = force_values[:max_frames] if len(force_values) > max_frames else force_values
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x = np.arange(len(force_values))
+    ax.plot(x, force_values, "b-", linewidth=1.5, alpha=0.8)
+    ax.fill_between(x, force_values, alpha=0.3)
+
+    mean_val = float(np.mean(force_values)) if len(force_values) else float("nan")
+    max_val = float(np.max(force_values)) if len(force_values) else float("nan")
+    min_val = float(np.min(force_values)) if len(force_values) else float("nan")
+
+    ax.axhline(y=mean_val, color="r", linestyle="--", linewidth=1, label=f"Mean: {mean_val:.3f}")
+    ax.axhline(y=max_val, color="g", linestyle=":", linewidth=1, label=f"Max: {max_val:.3f}")
+    ax.axhline(y=min_val, color="orange", linestyle=":", linewidth=1, label=f"Min: {min_val:.3f}")
+
+    plot_title = title if title is not None else f"Force ({metric})"
+    ax.set_title(plot_title)
+    ax.set_xlabel("Frame Index")
+    ax.set_ylabel(f"Force ({metric})")
+    ax.legend(loc="upper right", fontsize=10)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    return fig
+
+def process_single_episode(policy, episode_data_list, episode_force_data, has_confidence, device, output_dir, episode_idx, video_fps=10):
     logger.info(f"Processing Episode {episode_idx} ({len(episode_data_list)} frames)")
 
     # Reset policy state if needed
@@ -159,23 +182,11 @@ def process_single_episode(policy, episode_data_list, has_confidence, device, ou
     xyz_error_data = []
     rpy_error_data = []
     log_sigma_data = [] if has_confidence else None
-    
-    # Force data for force curve
-    force_data = []
-    force_keys = []
 
-    # First pass: identify force keys and collect data (ONLY from obs_dict)
-    for sample in episode_data_list:
-        # Only check obs_dict (not extended_obs) - consistent with confidence head input
-        if 'obs' in sample:
-            for k, v in sample['obs'].items():
-                if 'wrench' in k.lower() and isinstance(v, torch.Tensor):
-                    if k not in force_keys:
-                        force_keys.append(k)
-    
-    force_keys = sorted(force_keys)
-    has_force = len(force_keys) > 0
-    logger.info(f"Found force keys: {force_keys}")
+    # Force data for force curve - use the extracted zarr data (same as force.py)
+    force_data = episode_force_data if episode_force_data is not None else []
+    has_force = len(force_data) > 0
+    logger.info(f"Force data available: {has_force}, shape: {force_data.shape if has_force else 'N/A'}")
 
     with torch.no_grad():
         for frame_idx, sample in enumerate(tqdm.tqdm(episode_data_list, desc=f"Episode {episode_idx}")):
@@ -198,66 +209,32 @@ def process_single_episode(policy, episode_data_list, has_confidence, device, ou
             xyz_error_data.append(error_xyz[0].tolist())
             rpy_error_data.append(error_rpy[0].tolist())
 
-            # Extract force data (ONLY from obs_dict - consistent with confidence head)
-            if has_force:
-                frame_force = []
-                for fk in force_keys:
-                    # Only get from obs_dict
-                    force_val = None
-                    if 'obs' in sample and fk in sample['obs']:
-                        force_val = sample['obs'][fk]
-                    
-                    if force_val is not None:
-                        # Get the last time step, all dimensions
-                        if len(force_val.shape) >= 3:
-                            force_val = force_val[0, -1, :].cpu().numpy()
-                        elif len(force_val.shape) == 2:
-                            force_val = force_val[0, :].cpu().numpy()
-                        else:
-                            force_val = force_val[0].cpu().numpy()
-                        frame_force.append(force_val)
-                    else:
-                        frame_force.append(np.zeros(6))  # Default 6D force
-                force_data.append(frame_force)
-
             # Compute confidence if available
             if has_confidence:
                 try:
-                    obs_tokens, _ = policy._predict_obs_tokens(obs_dict, extended_obs_dict, return_temporal_cond=True)
+                    if hasattr(policy, 'act_encoder') and hasattr(policy, 'confidence_encoder'):
+                        # Dual encoder policy - use confidence encoder
+                        obs_tokens, _ = policy._predict_obs_tokens(
+                            obs_dict, extended_obs_dict,
+                            encoder_type='confidence',
+                            return_temporal_cond=True
+                        )
+                    else:
+                        # other policies
+                        obs_tokens, _ = policy._predict_obs_tokens(
+                            obs_dict, extended_obs_dict, 
+                            return_temporal_cond=True
+                        )
                     log_sigma = policy._compute_confidence_logits(obs_tokens)
                     log_sigma_val = float(log_sigma.mean().item()) if log_sigma is not None else float('nan')
                     log_sigma_data.append(log_sigma_val)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to compute confidence: {e}")
                     log_sigma_data.append(float('nan'))
 
     # Generate videos
     logger.info("Generating videos...")
     video_writers = {}
-
-    # Create force plot function
-    def create_force_plot(force_data_list, force_keys, title="Force/Torque", max_frames=200):
-        """Create force/torque plot showing all 6 dimensions (FX, FY, FZ, TX, TY, TZ)"""
-        n_dims = 6
-        fig, axes = plt.subplots(2, 3, figsize=(12, 6))
-        axes = axes.flatten()
-        labels = ['FX', 'FY', 'FZ', 'TX', 'TY', 'TZ']
-        
-        for i in range(n_dims):
-            axis_data = []
-            for frame_force in force_data_list[:max_frames]:
-                if i < len(frame_force):
-                    axis_data.append(frame_force[i])
-                else:
-                    axis_data.append(0.0)
-            axes[i].plot(range(len(axis_data)), axis_data)
-            axes[i].set_title(labels[i])
-            axes[i].set_xlabel('Frame')
-            axes[i].set_ylabel('Force/Nm')
-            axes[i].grid(True)
-        
-        fig.suptitle(title)
-        plt.tight_layout()
-        return fig
 
     for frame_idx in tqdm.tqdm(range(len(episode_data_list)), desc=f"Episode {episode_idx} Video"):
         # Create plots
@@ -298,13 +275,17 @@ def process_single_episode(policy, episode_data_list, has_confidence, device, ou
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Create special 3-panel confidence video (upper: confidence, middle: force, lower: frame)
-        if has_confidence and log_sigma_data and has_force and force_data:
-            # Create confidence plot (smaller for 3-panel layout)
-            fig_sigma = create_simple_plot(log_sigma_data[:frame_idx+1], 'Confidence (log σ)', 'log σ', len(episode_data_list))
+        if has_confidence and log_sigma_data and has_force and len(force_data) > 0:
+            # Create confidence plot (smaller for 3-panel layout) with threshold line
+            fig_sigma = create_simple_plot(log_sigma_data[:frame_idx+1], 'Confidence (log σ)', 'log σ', len(episode_data_list), threshold_line=2.5)
             confidence_plot = fig_to_image(fig_sigma)
             
-            # Create force plot
-            fig_force = create_force_plot(force_data[:frame_idx+1], force_keys, 'Force/Torque', len(episode_data_list))
+            # Create force plot - pass the zarr force array directly
+            force_arr = np.array(force_data[:frame_idx+1])  # Shape: (n_frames, 6) or (n_frames, n_keys, 6)
+            if force_arr.ndim == 3:
+                # Multiple force keys - average across keys to get a single curve
+                force_arr = force_arr.mean(axis=1)
+            fig_force = create_force_plot(force_arr, metric="norm", title="Episode Force (norm)", max_frames=len(episode_data_list))
             force_plot = fig_to_image(fig_force)
             
             # Resize all to same width
@@ -330,7 +311,7 @@ def process_single_episode(policy, episode_data_list, has_confidence, device, ou
 
         # Also create 2-panel confidence video if force not available
         if has_confidence and log_sigma_data:
-            fig_sigma = create_simple_plot(log_sigma_data[:frame_idx+1], 'Confidence (log σ)', 'log σ', len(episode_data_list))
+            fig_sigma = create_simple_plot(log_sigma_data[:frame_idx+1], 'Confidence (log σ)', 'log σ', len(episode_data_list), threshold_line=2.5)
             plots['log_sigma'] = fig_to_image(fig_sigma)
 
         # Combine plot and image for each video
@@ -377,7 +358,6 @@ def process_single_episode(policy, episode_data_list, has_confidence, device, ou
     config_name="train_act_confidence_workspace"
 )
 def main(cfg):
-    """Simplified main function for policy evaluation"""
     logger.info("Starting policy evaluation...")
 
     # Load checkpoint
@@ -385,7 +365,16 @@ def main(cfg):
     if not ckpt_path:
         raise ValueError("Set CKPT_PATH environment variable")
 
+    # Get output directory from environment variable or use default
+    output_dir = os.environ.get('OUTPUT_DIR')
+    if output_dir:
+        output_dir = pathlib.Path(output_dir)
+    else:
+        output_dir = pathlib.Path(ckpt_path).parent / "evaluation_videos"
+    output_dir.mkdir(exist_ok=True, parents=True)
+
     logger.info(f"Loading checkpoint: {ckpt_path}")
+    logger.info(f"Output directory: {output_dir}")
     payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
 
     # Create workspace and load policy
@@ -395,13 +384,13 @@ def main(cfg):
 
     # Get policy
     policy = workspace.ema_model if cfg.training.use_ema else workspace.model
-    if not isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy, HybridDiffusionACTPolicy, DiffusionTransformerImagePolicy)):
+    if not isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy, ACTConfidenceDualEncoderStagewisePolicy, ACTConfidenceStagewisePolicy, HybridDiffusionACTPolicy, HybridDiffusionACTStagewisePolicy, DiffusionTransformerImagePolicy)):
         raise ValueError(f"Unsupported policy type: {type(policy)}")
 
     # Determine evaluation parameters
-    if isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy)):
+    if isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy, ACTConfidenceDualEncoderStagewisePolicy, ACTConfidenceStagewisePolicy)):
         has_confidence = policy.confidence_head is not None
-    elif isinstance(policy, HybridDiffusionACTPolicy):
+    elif isinstance(policy, (HybridDiffusionACTPolicy, HybridDiffusionACTStagewisePolicy)):
         has_confidence = hasattr(policy, 'confidence_head') and policy.confidence_head is not None
     else:  # DiffusionTransformerImagePolicy
         has_confidence = False
@@ -439,28 +428,73 @@ def main(cfg):
                                             for k, v in sample['extended_obs'].items() if isinstance(v, torch.Tensor)}
         episode_data[episode_idx].append(sample_batch)
 
-    # Create output directory
-    output_dir = pathlib.Path(ckpt_path).parent / "evaluation_videos"
-    output_dir.mkdir(exist_ok=True, parents=True)
+    # Create output directory (already created above)
     video_fps = cfg.get('video_fps', 10)
+
+    # Extract force data from zarr (same approach as force.py)
+    episode_ranges = []
+    start = 0
+    for end in episode_ends:
+        episode_ranges.append((start, int(end)))
+        start = int(end)
+
+    # Find force keys in zarr
+    force_keys = []
+    for k in replay_buffer.keys():
+        if 'wrench' in k.lower():
+            force_keys.append(k)
+    force_keys = sorted(force_keys)
+    logger.info(f"Found force keys in zarr: {force_keys}")
+
+    # Load force data from zarr
+    episode_force_data_list = [None] * n_episodes
+    if len(force_keys) > 0:
+        # Load all force data
+        all_force_data = {}
+        for fk in force_keys:
+            if fk in replay_buffer:
+                all_force_data[fk] = replay_buffer[fk][:]
+                logger.info(f"Loaded force data for {fk}: shape {all_force_data[fk].shape}")
+
+        # Extract force for each episode
+        for ep_idx, (ep_start, ep_end) in enumerate(episode_ranges):
+            if len(force_keys) == 1:
+                # Single force key - use directly
+                episode_force_data_list[ep_idx] = all_force_data[force_keys[0]][ep_start:ep_end]
+            else:
+                # Multiple force keys - stack them
+                ep_forces = [all_force_data[fk][ep_start:ep_end] for fk in force_keys]
+                episode_force_data_list[ep_idx] = np.stack(ep_forces, axis=1)  # (n_frames, n_keys, 6)
 
     logger.info(f"Processing {n_episodes} episodes...")
     logger.info(f"Output directory: {output_dir}")
 
-    # Process episodes
+    # Collect all confidence data and save to JSON
+    all_confidence_data = {}
     for episode_idx in range(min(n_episodes, cfg.get('max_episodes', n_episodes))):
         if len(episode_data[episode_idx]) == 0:
             continue
-
-        process_single_episode(
+        episode_result = process_single_episode(
             policy=policy,
             episode_data_list=episode_data[episode_idx],
+            episode_force_data=episode_force_data_list[episode_idx],
             has_confidence=has_confidence,
             device=device,
             output_dir=output_dir,
             episode_idx=episode_idx,
             video_fps=video_fps
         )
+        
+        if has_confidence and episode_result['log_sigma_data'] is not None:
+            all_confidence_data[episode_idx] = episode_result['log_sigma_data']
+    
+    # Save all confidence data to a single JSON file
+    if all_confidence_data:
+        all_confidence_data_json = {str(k): [float(x) if not np.isnan(x) else None for x in v] for k, v in all_confidence_data.items()}
+        all_confidence_json_path = output_dir / "all_episodes_confidence.json"
+        with open(all_confidence_json_path, 'w') as f:
+            json.dump(all_confidence_data_json, f, indent=2)
+        logger.info(f"Saved confidence data to {all_confidence_json_path}")
 
     logger.info("Evaluation completed!")
 

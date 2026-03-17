@@ -215,7 +215,6 @@ class TrainHybridDiffusionACTWorkspace(BaseWorkspace):
         logger.info("Starting training...")
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
-                # Update progress for scheduling (e.g., obs_drop)
                 self.model.update_progress(local_epoch_idx / cfg.training.num_epochs)
                 print(f"local_epoch_idx: {local_epoch_idx}, cfg.training.num_epochs: {cfg.training.num_epochs}")
                 # Update epoch for stage-based training

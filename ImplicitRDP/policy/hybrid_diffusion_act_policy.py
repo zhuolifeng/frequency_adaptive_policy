@@ -10,7 +10,6 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 from ImplicitRDP.model.common.normalizer import LinearNormalizer
 from ImplicitRDP.policy.base_image_policy import BaseImagePolicy
-from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.model.vision.transformer_obs_encoder import TransformerObsEncoder
 from ImplicitRDP.model.vision.multi_image_obs_encoder import MultiImageObsEncoder
@@ -19,16 +18,12 @@ from ImplicitRDP.model.vision.timm_obs_encoder import TimmObsEncoder
 from ImplicitRDP.model.act.act_transformer import ACTTransformer
 from ImplicitRDP.model.confidence.transformer import TransformerConfidenceHead
 from ImplicitRDP.model.force.rnn import RNN
-from ImplicitRDP.model.diffusion.controlnet_for_action_diffusion import ControlNetForActionDiffusion
-from ImplicitRDP.model.force.force_encoder import ForceEncoder
-from ImplicitRDP.model.vector_quantize_pytorch.residual_vq import ResidualVQ
-from ImplicitRDP.policy.curriculum_utils import get_scale, gaussian_2d_smoothing_separate
 
 from loguru import logger
 
 
 class HybridDiffusionACTPolicy(BaseImagePolicy):
-    def __init__(self,
+    def __init__(self, 
             shape_meta: dict,
             noise_scheduler: DDPMScheduler,
             diffusion_model: Union[TransformerForDiffusion],
@@ -39,37 +34,12 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
             n_obs_steps,
             num_inference_steps=None,
             input_pertub=0.1,
-            obs_drop=0.0,
-            obs_drop_schedule_type="linear",
-            obs_drop_keys=None,
-            obs_drop_type: str = 'zero',
-            obs_drop_noise_scale=1,
-            sca_drop=0.0,
-            gaussian_start=10,
-            gaussian_end=0,
-            gaussian_ratio=2/3,
-            n_emb: int = 768,
+            n_emb: int=768,
             use_rnn_obs_encoder=False,
             rnn_obs_encoder_n_layer=1,
             rnn_obs_encoder_hidden_dim=512,
-            use_controlnet=False,
-            controlnet_n_layer=1,
-            controlnet_n_head=8,
-            controlnet_p_drop_attn=0.0,
-            use_force_encoder=False,
-            force_encoder_hidden_dims=[32, 64, 128],
-            force_encoder_output_dim=128,
-            use_vq=False,
-            vq_num_quantizers=2,
-            vq_codebook_size=32,
-            vq_quantize_dropout=False,
-            vq_ema_update=True,
-            vq_learnable_codebook=False,
             use_amp_for_inference: bool = False,
             amp_dtype: torch.dtype = torch.float16,
-            use_flow_matching: bool = False,
-            flow_matching_beta_a: float = 1.5,
-            flow_matching_beta_b: float = 1.0,
             confidence_hidden_dim: Optional[int] = None,
             confidence_gamma: float = 1.0,
             confidence_alpha: float = 0.2,
@@ -105,78 +75,16 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         self.extented_obs_keys = sorted(all_extented_obs_keys)
         temporal_cond_dim = sum([shape_meta['extended_obs'][extented_obs_key]['shape'][-1] 
                                  for extented_obs_key in self.extented_obs_keys])
-        if use_controlnet or use_rnn_obs_encoder or diffusion_model.use_rnn_head:
-            assert len(self.extented_obs_keys) > 0, "extended_obs is required for ControlNet, RNNObsEncoder or RNNHead"
-        
-        self.wrench_stack_obs_keys = []
-        if use_force_encoder:
-            if len(self.extented_obs_keys) != 0:
-                assert all(["wrench_stack" in key for key in self.extented_obs_keys]), \
-                    "Force encoder requires extended_obs only contains wrench_stack"
-                input_dim = temporal_cond_dim
-                key_in_obs_count = 0
-                for extented_obs_key in self.extented_obs_keys:
-                    if extented_obs_key in shape_meta['obs']:
-                        key_in_obs_count += 1
-                assert key_in_obs_count == 0 or key_in_obs_count == len(self.extented_obs_keys), \
-                    "All wrench_stack keys in extended_obs must exist in obs or not exist in obs"
-                if key_in_obs_count == len(self.extented_obs_keys):
-                    self.wrench_stack_obs_keys = self.extented_obs_keys
-            else:
-                obs_keys = list(shape_meta['obs'].keys())
-                all_wrench_stack_obs_keys = [key for key in obs_keys if 'wrench_stack' in key]
-                input_dim = sum([shape_meta['obs'][key]['shape'][-1] for key in all_wrench_stack_obs_keys])
-                self.wrench_stack_obs_keys = sorted(all_wrench_stack_obs_keys)
-
-            self.force_encoder = ForceEncoder(
-                input_dim=input_dim,
-                output_dim=force_encoder_output_dim,
-                hidden_dims=force_encoder_hidden_dims
+        if use_rnn_obs_encoder:
+            assert len(self.extented_obs_keys) > 0, "extended_obs is required for RNNObsEncoder"
+            self.rnn_obs_encoder = RNN(
+                input_dim=temporal_cond_dim,
+                hidden_dim=rnn_obs_encoder_hidden_dim,
+                layer_num=rnn_obs_encoder_n_layer,
+                n_emb=n_emb,
             )
-            temporal_cond_dim = force_encoder_output_dim
         else:
-            self.force_encoder = None
-        
-        if use_controlnet or use_rnn_obs_encoder:
-            assert not (use_controlnet and use_rnn_obs_encoder), "Cannot use both ControlNet and RNNObsEncoder"
-            if use_controlnet:
-                self.controlnet = ControlNetForActionDiffusion(
-                    shape_meta=shape_meta,
-                    action_horizon=action_horizon,
-                    n_layer=controlnet_n_layer,
-                    n_head=controlnet_n_head,
-                    n_emb=n_emb,
-                    max_cond_tokens=obs_tokens+1, # obs tokens + 1 token for time
-                    p_drop_attn=controlnet_p_drop_attn
-                )
-                self.rnn_obs_encoder = None
-            if use_rnn_obs_encoder:
-                self.rnn_obs_encoder = RNN(
-                    input_dim=temporal_cond_dim,
-                    hidden_dim=rnn_obs_encoder_hidden_dim,
-                    layer_num=rnn_obs_encoder_n_layer,
-                    n_emb=n_emb,
-                )
-                self.controlnet = None
-        else:
-            self.controlnet = None
             self.rnn_obs_encoder = None
-        
-        if use_vq:
-            assert use_rnn_obs_encoder, "VQ is only used when using RNNObsEncoder"
-            self.vq = ResidualVQ(
-                dim=n_emb,
-                num_quantizers=vq_num_quantizers,
-                codebook_size=vq_codebook_size,
-                quantize_dropout=vq_quantize_dropout,
-                ema_update=vq_ema_update,
-                learnable_codebook=vq_learnable_codebook,
-            )
-        else:
-            self.vq = None
-
-        if diffusion_model.use_second_cross_attention:
-            assert use_rnn_obs_encoder, "Second cross attention is only used when using RNNObsEncoder"
         
         self.shape_meta = shape_meta
         self.obs_encoder = obs_encoder
@@ -190,21 +98,8 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         self.action_dim = action_dim
         self.action_horizon = action_horizon
         self.input_pertub = input_pertub
-        self.obs_drop = obs_drop
-        self.obs_drop_schedule_type = obs_drop_schedule_type
-        self.progress = 0
-        self.obs_drop_keys = [] if obs_drop_keys is None else obs_drop_keys
-        self.obs_drop_type = obs_drop_type
-        self.obs_drop_noise_scale = obs_drop_noise_scale
-        self.sca_drop = sca_drop
-        self.gaussian_start = gaussian_start
-        self.gaussian_end = gaussian_end
-        self.gaussian_ratio = gaussian_ratio
         self.n_emb = n_emb
         self.use_amp_for_inference = use_amp_for_inference
-        self.use_flow_matching = use_flow_matching
-        self.flow_matching_beta_a = flow_matching_beta_a
-        self.flow_matching_beta_b = flow_matching_beta_b
         self.kwargs = kwargs
         self.confidence_gamma = confidence_gamma
         self.confidence_alpha = confidence_alpha
@@ -339,19 +234,8 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
             # inline post-processing previously implemented in _post_process_temporal_cond
             processed_cond = temporal_cond
 
-            if self.force_encoder is not None and len(self.wrench_stack_obs_keys) == 0:
-                B, T, _ = processed_cond.shape
-                processed_cond_4d = processed_cond.unsqueeze(1)
-                processed_cond = self.force_encoder(processed_cond_4d)
-                processed_cond = processed_cond.squeeze(1)
-                processed_cond = processed_cond.unsqueeze(1).expand(B, T, -1)
-
             if self.rnn_obs_encoder is not None:
                 processed_cond = self.rnn_obs_encoder(processed_cond)
-                if self.vq is not None:
-                    processed_cond, _, _ = self.vq(processed_cond)
-            else:
-                assert self.vq is None, "VQ is only used when using RNNObsEncoder"
 
             temporal_cond = processed_cond
         
@@ -447,17 +331,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         B = next(iter(nobs.values())).shape[0]
 
         this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-
-        if self.force_encoder is not None and self.wrench_stack_obs_keys != []:
-            wrench_stack_cond = []
-            for wrench_stack_obs_key in self.wrench_stack_obs_keys:
-                wrench_stack_obs = this_nobs[wrench_stack_obs_key]
-                wrench_stack_cond.append(wrench_stack_obs)
-            wrench_stack_cond = torch.cat(wrench_stack_cond, dim=-1)
-            wrench_stack_cond = wrench_stack_cond.reshape(B, -1, *wrench_stack_cond.shape[1:])
-            force_emb = self.force_encoder(wrench_stack_cond)
-            force_emb = force_emb.reshape(-1, *force_emb.shape[2:])
-            this_nobs["force_emb"] = force_emb
 
         obs_tokens = self.obs_encoder(this_nobs)
         if len(obs_tokens.shape) == 2:
@@ -611,61 +484,27 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                 inpainting_mask_batch = None
                 inpainting_data_batch = None
 
-            if self.use_flow_matching:
-                dt = -1.0 / self.num_inference_steps
-                time = 1.0
-                num_steps = self.num_inference_steps
-            else:
-                scheduler.set_timesteps(self.num_inference_steps)
-                timesteps = scheduler.timesteps
-                num_steps = len(timesteps)
+            scheduler.set_timesteps(self.num_inference_steps)
+            timesteps = scheduler.timesteps
+            num_steps = len(timesteps)
 
             for step_idx in range(num_steps):
                 trajectory_batch[condition_mask_batch] = condition_data_batch[condition_mask_batch]
 
                 if inpainting_mask_batch is not None and inpainting_data_batch is not None:
                     if step_idx < num_steps - 1 and (step_idx + 1) % inpainting_resample_steps == 0:
-                        if self.use_flow_matching:
-                            next_time = time + dt
-                            noise = torch.randn_like(inpainting_data_batch)
-                            noisy_inpainting = next_time * noise + (1 - next_time) * inpainting_data_batch
-                        else:
-                            next_t = timesteps[step_idx + 1]
-                            noise = torch.randn_like(inpainting_data_batch)
-                            noisy_inpainting = scheduler.add_noise(inpainting_data_batch, noise, next_t)
+                        next_t = timesteps[step_idx + 1]
+                        noise = torch.randn_like(inpainting_data_batch)
+                        noisy_inpainting = scheduler.add_noise(inpainting_data_batch, noise, next_t)
                         trajectory_batch[inpainting_mask_batch] = noisy_inpainting[inpainting_mask_batch]
                     else:
                         trajectory_batch[inpainting_mask_batch] = inpainting_data_batch[inpainting_mask_batch]
 
-                if self.use_flow_matching:
-                    t_tensor = torch.full((trajectory_batch.shape[0],), time, device=trajectory_batch.device, dtype=torch.float32)
-                    t = (t_tensor * (scheduler.config.num_train_timesteps - 1)).long()
-                else:
-                    t = timesteps[step_idx]
+                t = timesteps[step_idx]
 
-                if self.controlnet is not None and temporal_cond_batch is not None:
-                    controls_batch = self.controlnet(
-                        temporal_cond_batch,
-                        t,
-                        cond=cond_batch
-                    )
+                if self.rnn_obs_encoder is not None and temporal_cond_batch is not None:
+                    temporal_cond_tokens_batch = self.rnn_obs_encoder(temporal_cond_batch)
                 else:
-                    controls_batch = None
-
-                if self.force_encoder is not None and temporal_cond_batch is not None:
-                    temporal_cond_emb_batch = self.force_encoder(temporal_cond_batch)
-                else:
-                    temporal_cond_emb_batch = None
-
-                if self.rnn_obs_encoder is not None and (temporal_cond_batch is not None or temporal_cond_emb_batch is not None):
-                    if temporal_cond_emb_batch is None:
-                        temporal_cond_tokens_batch = self.rnn_obs_encoder(temporal_cond_batch)
-                    else:
-                        temporal_cond_tokens_batch = self.rnn_obs_encoder(temporal_cond_emb_batch)
-                    if self.vq is not None:
-                        temporal_cond_tokens_batch, _, _ = self.vq(temporal_cond_tokens_batch)
-                else:
-                    assert self.vq is None, "VQ is only used when using RNNObsEncoder"
                     temporal_cond_tokens_batch = None
 
                 model_output = model(
@@ -673,20 +512,15 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                     t,
                     cond=cond_batch,
                     temporal_cond=temporal_cond_tokens_batch if temporal_cond_tokens_batch is not None else temporal_cond_batch,
-                    controls=controls_batch,
                 )
 
-                if self.use_flow_matching:
-                    trajectory_batch = trajectory_batch + dt * model_output
-                    time = time + dt
-                else:
-                    trajectory_batch = scheduler.step(
-                        model_output,
-                        t,
-                        trajectory_batch,
-                        generator=generator,
-                        **kwargs
-                    ).prev_sample
+                trajectory_batch = scheduler.step(
+                    model_output,
+                    t,
+                    trajectory_batch,
+                    generator=generator,
+                    **kwargs
+                ).prev_sample
 
             trajectory_batch[condition_mask_batch] = condition_data_batch[condition_mask_batch]
             if inpainting_mask_batch is not None and inpainting_data_batch is not None:
@@ -805,20 +639,11 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                     # while keeping temporal_cond raw for diffusion
                     B_concat, T, D = temporal_cond.shape
                     
-                    if self.force_encoder is not None and len(self.wrench_stack_obs_keys) == 0:
-                        temporal_cond_4d = temporal_cond.unsqueeze(1)
-                        temporal_cond_encoded = self.force_encoder(temporal_cond_4d)
-                        temporal_cond_encoded = temporal_cond_encoded.squeeze(1)
-                        temporal_cond_encoded = temporal_cond_encoded.unsqueeze(1).expand(B_concat, T, -1)
-                    else:
-                        temporal_cond_encoded = temporal_cond
+                    temporal_cond_encoded = temporal_cond
 
                     if self.rnn_obs_encoder is not None:
                         temporal_cond_tokens = self.rnn_obs_encoder(temporal_cond_encoded)
-                        if self.vq is not None:
-                            temporal_cond_tokens, _, _ = self.vq(temporal_cond_tokens)
                     else:
-                        assert self.vq is None, "VQ is only used when using RNNObsEncoder"
                         temporal_cond_tokens = temporal_cond_encoded
 
         if self.use_confidence_based_head_selection and self.confidence_head is not None:
@@ -1189,51 +1014,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         """Set current epoch for DP loss weight scheduling"""
         self.current_epoch = epoch
     
-    def apply_obs_drop(self, batch):
-        if self.obs_drop_type == "gaussian":
-            obs_drop_scale = get_scale(
-                scheduler=self.obs_drop_schedule_type,
-                start=self.gaussian_start,
-                end=self.gaussian_end,
-                cur_step=self.progress,
-                max_step=1,
-                ratio=self.gaussian_ratio
-            )
-        else:
-            if self.obs_drop_schedule_type == "constant":
-                obs_drop_scale = 1
-            elif self.obs_drop_schedule_type == "linear":
-                obs_drop_scale = self.progress
-            else:
-                raise ValueError(f"Unsupported obs_drop_schedule_type {self.obs_drop_schedule_type}")
-            obs_drop = self.obs_drop * obs_drop_scale
-
-        if self.obs_drop_type == "gaussian" or obs_drop > 0.0:
-            for key in self.obs_drop_keys:
-                batch_size = next(iter(batch['obs'].values())).shape[0]
-                if key in batch['obs']:
-                    if self.obs_drop_type == 'gaussian':
-                        assert len(batch['obs'][key].shape) == 5, "Gaussian dropout only supports 5D obs"
-                        batch['obs'][key] = gaussian_2d_smoothing_separate(batch['obs'][key], scale=obs_drop_scale)
-                    else:
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        if self.obs_drop_type == 'zero':
-                            batch['obs'][key][drop_obs_mask] = 0.0
-                        elif self.obs_drop_type == 'learnable':
-                            raise NotImplementedError("learnable obs_drop_type is not yet implemented in HybridDiffusionACTPolicy")
-                        elif self.obs_drop_type == 'noise':
-                            batch['obs'][key][drop_obs_mask] = self.obs_drop_noise_scale * torch.randn_like(batch['obs'][key][drop_obs_mask])
-                
-                if 'extended_obs' in batch and key in batch['extended_obs']:
-                    if self.obs_drop_type == 'zero':
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        batch['extended_obs'][key][drop_obs_mask] = 0.0
-                    elif self.obs_drop_type == 'learnable':
-                        raise NotImplementedError("learnable obs_drop_type is not yet implemented in HybridDiffusionACTPolicy")
-                    elif self.obs_drop_type == 'noise':
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        batch['extended_obs'][key][drop_obs_mask] = self.obs_drop_noise_scale * torch.randn_like(batch['extended_obs'][key][drop_obs_mask])
-    
     def compute_loss(self, batch: Dict[str, torch.Tensor], loss_mask=None):
         action = batch['action'] 
         T_action = action.shape[1] 
@@ -1249,20 +1029,17 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                         padding = last_step.repeat(1, T_action - T_extended, *([1] * (len(value.shape) - 2)))
                         batch['extended_obs'][key] = torch.cat([value, padding], dim=1)
 
-        trajectory, noise, timesteps, vq_losses, pred = self.model_forward(batch)
+        trajectory, noise, timesteps, pred = self.model_forward(batch)
         
-        if self.use_flow_matching:
-            target = noise - trajectory
+        pred_type = self.noise_scheduler.config.prediction_type 
+        if pred_type == 'epsilon':
+            target = noise
+        elif pred_type == 'sample':
+            target = trajectory
+        elif pred_type == 'v_prediction':
+            target = self.noise_scheduler.get_velocity(trajectory, noise, timesteps)
         else:
-            pred_type = self.noise_scheduler.config.prediction_type 
-            if pred_type == 'epsilon':
-                target = noise
-            elif pred_type == 'sample':
-                target = trajectory
-            elif pred_type == 'v_prediction':
-                target = self.noise_scheduler.get_velocity(trajectory, noise, timesteps)
-            else:
-                raise ValueError(f"Unsupported prediction type {pred_type}")
+            raise ValueError(f"Unsupported prediction type {pred_type}")
         
         B = trajectory.shape[0]
         device = trajectory.device
@@ -1273,14 +1050,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         diffusion_loss_vec = reduce(diffusion_loss_vec, 'b ... -> b', 'mean')
         diffusion_loss_masked = diffusion_loss_vec[loss_mask]
         diffusion_loss_mean = diffusion_loss_masked.mean()
-        
-        vq_reg_loss = None
-        if vq_losses is not None:
-            assert loss_mask.sum() == pred.shape[0], "When using VQ, the loss mask must be all true"
-            vq_reg_loss = torch.sum(vq_losses)
-            diffusion_loss_with_reg = diffusion_loss_mean + vq_reg_loss
-        else:
-            diffusion_loss_with_reg = diffusion_loss_mean
         
         obs_dict = batch['obs']
         extended_obs_dict = batch.get('extended_obs', None)
@@ -1331,7 +1100,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         else:
             dp_loss_weight = 1.0  # No warmup, train both from the start
         
-        total_loss = diffusion_loss_with_reg * dp_loss_weight + act_loss_component
+        total_loss = diffusion_loss_mean * dp_loss_weight + act_loss_component
         
         loss_dict = {
             'diffusion_loss': diffusion_loss_mean.item(),
@@ -1339,8 +1108,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
             'total_loss': total_loss.item(),
             'dp_loss_weight': dp_loss_weight
         }
-        if vq_reg_loss is not None:
-            loss_dict['vq_loss'] = vq_reg_loss.item()
         
         if log_sigma is not None:
             sigma_mean = sigma_stats.mean().item() if sigma_stats is not None else 0.0
@@ -1360,32 +1127,19 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         # normalize input
         assert 'valid_mask' not in batch
 
-        # apply observation dropout
-        self.apply_obs_drop(batch)
-
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
         trajectory = nactions
         B = nactions.shape[0]
 
-        if self.controlnet is not None or self.rnn_obs_encoder is not None or self.diffusion_model.use_rnn_head:
-            assert 'extended_obs' in batch, "extended_obs is required for ControlNet or RNNObsEncoder"
+        if self.rnn_obs_encoder is not None or self.diffusion_model.use_rnn_head:
+            assert 'extended_obs' in batch, "extended_obs is required for RNNObsEncoder"
             temporal_cond = self.get_temporal_cond(batch["extended_obs"])
         else:
             temporal_cond = None
         
         # process input
         this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-        if self.force_encoder is not None and self.wrench_stack_obs_keys != []:
-            wrench_stack_cond = []
-            for wrench_stack_obs_key in self.wrench_stack_obs_keys:
-                wrench_stack_obs = this_nobs[wrench_stack_obs_key]
-                wrench_stack_cond.append(wrench_stack_obs)
-            wrench_stack_cond = torch.cat(wrench_stack_cond, dim=-1)
-            wrench_stack_cond = wrench_stack_cond.reshape(B, -1, *wrench_stack_cond.shape[1:])
-            force_emb = self.force_encoder(wrench_stack_cond)
-            force_emb = force_emb.reshape(-1, *force_emb.shape[2:])
-            this_nobs["force_emb"] = force_emb
         obs_tokens = self.obs_encoder(this_nobs)
         if len(obs_tokens.shape) == 2:
             obs_tokens = obs_tokens.reshape(B, -1, *obs_tokens.shape[1:])
@@ -1396,64 +1150,34 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         else:
             assert self.input_pertub == 0.0, "input_pertub is not supported when noise is provided"
         
-        if self.use_flow_matching:
-            # Flow matching: sample time from beta distribution
-            # time in [0, 1]: t=0 is target, t=1 is noise
-            time = torch.distributions.Beta(self.flow_matching_beta_a, self.flow_matching_beta_b).sample(
-                (nactions.shape[0],)
-            ).to(trajectory.device) * 0.999 + 0.001
-            # Flow matching interpolation: x_t = t * noise + (1 - t) * x_0
-            time_expanded = time[:, None, None]
-            noisy_trajectory = time_expanded * noise + (1 - time_expanded) * trajectory
-            # Convert continuous time to discrete timestep for model input
-            timesteps = (time * (self.noise_scheduler.config.num_train_timesteps - 1)).long()
-        else:
-            # input perturbation by adding additonal noise to alleviate exposure bias
-            # reference: https://github.com/forever208/DDPM-IP
-            noise_new = noise + self.input_pertub * torch.randn(trajectory.shape, device=trajectory.device)
+        # input perturbation by adding additonal noise to alleviate exposure bias
+        # reference: https://github.com/forever208/DDPM-IP
+        noise_new = noise + self.input_pertub * torch.randn(trajectory.shape, device=trajectory.device)
 
-            if timesteps is None:
-                timesteps = torch.randint(
-                    0, self.noise_scheduler.config.num_train_timesteps, 
-                    (nactions.shape[0],), device=trajectory.device
-                ).long()
+        if timesteps is None:
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (nactions.shape[0],), device=trajectory.device
+            ).long()
 
-            # Add noise to the clean images according to the noise magnitude at each timestep
-            # (this is the forward diffusion process)
-            noisy_trajectory = self.noise_scheduler.add_noise(
-                trajectory, noise_new, timesteps)
+        # Add noise to the clean images according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
+        noisy_trajectory = self.noise_scheduler.add_noise(
+            trajectory, noise_new, timesteps)
         
-        if self.controlnet is not None and temporal_cond is not None:
-            controls = self.controlnet(temporal_cond,
-                                      timesteps,
-                                      cond=obs_tokens)
-        else:
-            controls = None
-
-        if self.force_encoder is not None and temporal_cond is not None:
-            temporal_cond = self.force_encoder(temporal_cond)
-
         if self.rnn_obs_encoder is not None and temporal_cond is not None:
             temporal_cond_tokens = self.rnn_obs_encoder(temporal_cond)
-            if self.vq is not None:
-                temporal_cond_tokens, vq_indices, vq_losses = self.vq(temporal_cond_tokens)
-            else:
-                vq_losses = None
         else:
-            assert self.vq is None, "VQ is only used when using RNNObsEncoder"
             temporal_cond_tokens = None
-            vq_losses = None
         
         # Predict the noise residual
         pred = self.diffusion_model(
             noisy_trajectory,
             timesteps, 
             cond=obs_tokens,
-            temporal_cond=temporal_cond_tokens if temporal_cond_tokens is not None else temporal_cond,
-            controls=controls,
-            sca_drop=self.sca_drop
+            temporal_cond=temporal_cond_tokens if temporal_cond_tokens is not None else temporal_cond
         )
-        return trajectory, noise, timesteps, vq_losses, pred
+        return trajectory, noise, timesteps, pred
     
     
     def _compute_act_loss(self,
@@ -1536,28 +1260,11 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         optim_groups = self.diffusion_model.get_optim_groups(
             weight_decay=weight_decay)
 
-        if self.controlnet is not None:
-            optim_groups += self.controlnet.get_optim_groups(
-                weight_decay=weight_decay
-            )
-
         if self.rnn_obs_encoder is not None:
             optim_groups += self.rnn_obs_encoder.get_optim_groups(
                 weight_decay=weight_decay
             )
 
-        if self.vq is not None:
-            optim_groups += [{
-                "params": self.vq.parameters(),
-                "weight_decay": 0.0,
-            }]
-        
-        if self.force_encoder is not None:
-            optim_groups += [{
-                "params": self.force_encoder.parameters(),
-                "weight_decay": weight_decay,
-            }]
-        
         if self.confidence_head is not None:
             if hasattr(self.confidence_head, 'get_optim_groups'):
                 optim_groups += self.confidence_head.get_optim_groups(weight_decay=weight_decay)
@@ -1567,12 +1274,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                     "weight_decay": weight_decay,
                 }]
 
-        if self.obs_drop > 0.0 and self.obs_drop_type == 'learnable':
-            optim_groups += [{
-                "params": self.obs_drop_tokens.parameters(),
-                "weight_decay": 0.0,
-            }]
-        
         backbone_params = list()
         other_obs_params = list()
         for key, value in self.obs_encoder.named_parameters():

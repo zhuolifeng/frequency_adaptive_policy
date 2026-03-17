@@ -12,21 +12,9 @@ from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.model.act.act_transformer import ACTTransformer
 from ImplicitRDP.model.confidence.transformer import TransformerConfidenceHead
 from ImplicitRDP.model.force.rnn import RNN
-from ImplicitRDP.model.force.force_encoder import ForceEncoder
-from ImplicitRDP.model.vector_quantize_pytorch.residual_vq import ResidualVQ
-from ImplicitRDP.policy.curriculum_utils import get_scale, gaussian_2d_smoothing_separate
 
 
 class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
-    """
-    ACT policy with dual encoders:
-    - Encoder A (act_encoder): encodes obs for ACT action prediction
-    - Encoder B (confidence_encoder): encodes obs for confidence head
-    
-    Two independent encoders allow learning different representations for
-    action prediction and uncertainty estimation.
-    """
-
     def __init__(self,
                  shape_meta: dict,
                  act_encoder: torch.nn.Module,
@@ -35,29 +23,10 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
                  horizon: int,
                  n_action_steps: int,
                  n_obs_steps: int,
-                 input_pertub: float = 0.0,
-                 obs_drop: float = 0.0,
-                 obs_drop_schedule_type: str = "linear",
-                 obs_drop_keys: Optional[List[str]] = None,
-                 obs_drop_type: str = 'zero',
-                 obs_drop_noise_scale: float = 1.0,
-                 sca_drop: float = 0.0,
-                 gaussian_start: float = 10.0,
-                 gaussian_end: float = 0.0,
-                 gaussian_ratio: float = 2 / 3,
                  n_emb: int = 768,
                  use_rnn_obs_encoder: bool = False,
                  rnn_obs_encoder_n_layer: int = 1,
                  rnn_obs_encoder_hidden_dim: int = 512,
-                 use_force_encoder: bool = False,
-                 force_encoder_hidden_dims: Optional[List[int]] = None,
-                 force_encoder_output_dim: int = 128,
-                 use_vq: bool = False,
-                 vq_num_quantizers: int = 2,
-                 vq_codebook_size: int = 32,
-                 vq_quantize_dropout: bool = False,
-                 vq_ema_update: bool = True,
-                 vq_learnable_codebook: bool = False,
                  use_amp_for_inference: bool = False,
                  amp_dtype: torch.dtype = torch.float16,
                  confidence_hidden_dim: Optional[int] = None,
@@ -74,12 +43,6 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
                  confidence_transformer_dropout: float = 0.1,
                  confidence_action_dims: int = 6,
                  normalize_confidence_loss: bool = True,
-                 # Separate encoder configs for dual encoder
-                 act_encoder_has_rnn: bool = False,
-                 confidence_encoder_has_rnn: bool = False,
-                 # Whether to share temporal conditioning between encoders
-                 share_temporal_cond: bool = False,
-                 # Freeze encoders
                  freeze_act_encoder: bool = False,
                  freeze_confidence_encoder: bool = False,
                  **kwargs):
@@ -90,121 +53,42 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
         self.action_horizon = horizon
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
-        self.input_pertub = input_pertub
 
         self.shape_meta = shape_meta
-        # Dual encoder: act_encoder for ACT head, confidence_encoder for confidence head
         self.act_encoder = act_encoder
         self.confidence_encoder = confidence_encoder if confidence_encoder is not None else act_encoder
+        self.obs_encoder = None
         self.act_model = act_model
         self.normalizer = LinearNormalizer()
         self.kwargs = kwargs
 
-        # Encoder freeze flags
         self.freeze_act_encoder = freeze_act_encoder
         self.freeze_confidence_encoder = freeze_confidence_encoder
 
-        self.obs_drop = obs_drop
-        self.obs_drop_schedule_type = obs_drop_schedule_type
-        self.obs_drop_keys = [] if obs_drop_keys is None else obs_drop_keys
-        self.obs_drop_type = obs_drop_type
-        self.obs_drop_noise_scale = obs_drop_noise_scale
-        self.sca_drop = sca_drop
-        self.gaussian_start = gaussian_start
-        self.gaussian_end = gaussian_end
-        self.gaussian_ratio = gaussian_ratio
         self.n_emb = n_emb
         self.use_amp_for_inference = use_amp_for_inference
         self.amp_dtype = amp_dtype if use_amp_for_inference else None
         self.progress = 0.0
-
-        # Whether to share temporal conditioning between encoders
-        self.share_temporal_cond = share_temporal_cond
 
         all_extented_obs_keys = list(shape_meta['extended_obs'].keys()) if 'extended_obs' in shape_meta else []
         self.extented_obs_keys = sorted(all_extented_obs_keys)
         temporal_cond_dim = sum([shape_meta['extended_obs'][extented_obs_key]['shape'][-1]
                                  for extented_obs_key in self.extented_obs_keys])
 
-        # Force encoder for temporal conditioning
-        self.wrench_stack_obs_keys = []
-        self.force_encoder = None
-        if use_force_encoder:
-            force_encoder_hidden_dims = force_encoder_hidden_dims or [32, 64, 128]
-            if len(self.extented_obs_keys) != 0:
-                assert all(["wrench_stack" in key for key in self.extented_obs_keys]), \
-                    "Force encoder requires extended_obs only contains wrench_stack"
-                input_dim = temporal_cond_dim
-                key_in_obs_count = 0
-                for extented_obs_key in self.extented_obs_keys:
-                    if extented_obs_key in shape_meta['obs']:
-                        key_in_obs_count += 1
-                assert key_in_obs_count == 0 or key_in_obs_count == len(self.extented_obs_keys), \
-                    "All wrench_stack keys in extended_obs must exist in obs or not exist in obs"
-                if key_in_obs_count == len(self.extented_obs_keys):
-                    self.wrench_stack_obs_keys = self.extented_obs_keys
-            else:
-                obs_keys = list(shape_meta['obs'].keys())
-                all_wrench_stack_obs_keys = [key for key in obs_keys if 'wrench_stack' in key]
-                input_dim = sum([shape_meta['obs'][key]['shape'][-1] for key in all_wrench_stack_obs_keys])
-                self.wrench_stack_obs_keys = sorted(all_wrench_stack_obs_keys)
-
-            self.force_encoder = ForceEncoder(
-                input_dim=input_dim,
-                output_dim=force_encoder_output_dim,
-                hidden_dims=force_encoder_hidden_dims
-            )
-            temporal_cond_dim = force_encoder_output_dim
-
-        # RNN encoders for temporal conditioning (shared or separate)
+        self.rnn_obs_encoder = None
         self.rnn_act_encoder = None
         self.rnn_confidence_encoder = None
         
         if use_rnn_obs_encoder:
             assert len(self.extented_obs_keys) > 0, "extended_obs is required when using RNN obs encoder"
             
-            if act_encoder_has_rnn:
-                self.rnn_act_encoder = RNN(
-                    input_dim=temporal_cond_dim,
-                    hidden_dim=rnn_obs_encoder_hidden_dim,
-                    layer_num=rnn_obs_encoder_n_layer,
-                    n_emb=n_emb,
-                )
-            
-            if confidence_encoder_has_rnn:
-                self.rnn_confidence_encoder = RNN(
-                    input_dim=temporal_cond_dim,
-                    hidden_dim=rnn_obs_encoder_hidden_dim,
-                    layer_num=rnn_obs_encoder_n_layer,
-                    n_emb=n_emb,
-                )
-            
-            # If sharing temporal cond and only one RNN, use it for both
-            if self.share_temporal_cond:
-                if self.rnn_act_encoder is None and self.rnn_confidence_encoder is None:
-                    self.rnn_act_encoder = RNN(
-                        input_dim=temporal_cond_dim,
-                        hidden_dim=rnn_obs_encoder_hidden_dim,
-                        layer_num=rnn_obs_encoder_n_layer,
-                        n_emb=n_emb,
-                    )
-                    self.rnn_confidence_encoder = self.rnn_act_encoder
-
-        # VQ for temporal conditioning (only used with RNN)
-        self.vq = None
-        if use_vq:
-            assert self.rnn_act_encoder is not None or self.rnn_confidence_encoder is not None, \
-                "VQ is only used when using RNNObsEncoder"
-            self.vq = ResidualVQ(
-                dim=n_emb,
-                num_quantizers=vq_num_quantizers,
-                codebook_size=vq_codebook_size,
-                quantize_dropout=vq_quantize_dropout,
-                ema_update=vq_ema_update,
-                learnable_codebook=vq_learnable_codebook,
+            self.rnn_act_encoder = RNN(
+                input_dim=temporal_cond_dim,
+                hidden_dim=rnn_obs_encoder_hidden_dim,
+                layer_num=rnn_obs_encoder_n_layer,
+                n_emb=n_emb,
             )
-
-        # Confidence head parameters
+        
         self.confidence_gamma = confidence_gamma
         self.confidence_alpha = confidence_alpha
         self.confidence_log_sigma_min = confidence_log_sigma_min
@@ -297,28 +181,10 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
 
         temporal_cond = torch.cat(temporal_cond, dim=-1)
         if post_process:
-            processed_cond = temporal_cond
-
-            if self.force_encoder is not None and len(self.wrench_stack_obs_keys) == 0:
-                B, T, _ = processed_cond.shape
-                processed_cond_4d = processed_cond.unsqueeze(1)
-                processed_cond = self.force_encoder(processed_cond_4d)
-                processed_cond = processed_cond.squeeze(1)
-                processed_cond = processed_cond.unsqueeze(1).expand(B, T, -1)
-
-            # Apply RNN encoding (could be shared or separate)
             if self.rnn_act_encoder is not None:
-                processed_cond = self.rnn_act_encoder(processed_cond)
-                if self.vq is not None:
-                    processed_cond, _, _ = self.vq(processed_cond)
+                temporal_cond = self.rnn_act_encoder(temporal_cond)
             elif self.rnn_confidence_encoder is not None:
-                processed_cond = self.rnn_confidence_encoder(processed_cond)
-                if self.vq is not None:
-                    processed_cond, _, _ = self.vq(processed_cond)
-            else:
-                assert self.vq is None, "VQ is only used when using RNNObsEncoder"
-
-            temporal_cond = processed_cond
+                temporal_cond = self.rnn_confidence_encoder(temporal_cond)
 
         return temporal_cond
 
@@ -328,7 +194,6 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
                                   extend_obs_pad_after_n: Optional[int] = None,
                                   allow_partial: bool = False,
                                   post_process: bool = False) -> Optional[torch.Tensor]:
-        """Get temporal conditioning specifically for ACT encoder."""
         return self.get_temporal_cond(extended_obs_dict, extended_obs_last_step, 
                                      extend_obs_pad_after_n, allow_partial, post_process)
 
@@ -345,48 +210,24 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
                             return_expanded_obs_tokens: bool = False,
                             return_temporal_cond: bool = False
                             ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
-        """
-        Predict observation tokens using specified encoder.
-        
-        Args:
-            obs_dict: Observation dictionary
-            extended_obs_dict: Extended observation dictionary
-            encoder_type: Which encoder to use ('act' or 'confidence')
-            return_expanded_obs_tokens: Whether to expand tokens for action horizon
-            return_temporal_cond: Whether to return temporal conditioning
-        """
         nobs = self.normalizer.normalize(obs_dict)
         B = next(iter(nobs.values())).shape[0]
         this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
 
         # Select encoder
         if encoder_type == 'act':
-            encoder = self.act_encoder
-            rnn_encoder = self.rnn_act_encoder
+            self.obs_encoder = self.act_encoder
+            self.rnn_obs_encoder = self.rnn_act_encoder
         else:  # confidence
-            encoder = self.confidence_encoder
-            rnn_encoder = self.rnn_confidence_encoder
+            self.obs_encoder = self.confidence_encoder
+            self.rnn_obs_encoder = self.rnn_confidence_encoder
 
-        # Force encoding (if applicable)
-        if self.force_encoder is not None and self.wrench_stack_obs_keys:
-            wrench_stack_cond = []
-            for wrench_stack_obs_key in self.wrench_stack_obs_keys:
-                wrench_stack_obs = this_nobs[wrench_stack_obs_key]
-                wrench_stack_cond.append(wrench_stack_obs)
-            wrench_stack_cond = torch.cat(wrench_stack_cond, dim=-1)
-            wrench_stack_cond = wrench_stack_cond.reshape(B, -1, *wrench_stack_cond.shape[1:])
-            force_emb = self.force_encoder(wrench_stack_cond)
-            force_emb = force_emb.reshape(-1, *force_emb.shape[2:])
-            this_nobs["force_emb"] = force_emb
-
-        # Encode observations
-        obs_tokens = encoder(this_nobs)
+        obs_tokens = self.obs_encoder(this_nobs)
         if len(obs_tokens.shape) == 2:
             obs_tokens = obs_tokens.reshape(B, -1, *obs_tokens.shape[1:])
 
-        # Get temporal conditioning
         temporal_cond = None
-        if rnn_encoder is not None or self.share_temporal_cond:
+        if encoder_type == 'act' and self.rnn_obs_encoder is not None:
             if extended_obs_dict is not None:
                 temporal_cond = self.get_temporal_cond(
                     extended_obs_dict,
@@ -424,7 +265,7 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
                                 return_expanded_noisy_trajectory: bool = False
                                 ) -> torch.Tensor:
 
-        noisy_trajectory = torch.zeros((B, 0), dtype=self.dtype, device=self.device)
+        noisy_trajectory = torch.zeros((B,0), dtype=self.dtype, device=self.device)
         if return_expanded_noisy_trajectory:
             noisy_trajectory = noisy_trajectory.unsqueeze(1).expand(-1, self.action_horizon, -1)
         return noisy_trajectory
@@ -572,12 +413,7 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
     def _predict_action_act(self,
                             obs_dict: Dict[str, torch.Tensor],
                             extended_obs_dict: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
-        # Use ACT encoder for action prediction
-        obs_tokens, temporal_cond = self._predict_obs_tokens(
-            obs_dict, extended_obs_dict, 
-            encoder_type='act',
-            return_temporal_cond=True
-        )
+        obs_tokens, temporal_cond = self._predict_obs_tokens(obs_dict, extended_obs_dict, encoder_type='act', return_temporal_cond=True)
         B = obs_tokens.shape[0]
         if len(obs_tokens.shape) == 2:
             obs_tokens = obs_tokens.reshape(B, -1, self.n_emb)
@@ -626,48 +462,6 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
     # ------------------------------------------------------------------
     # Training helpers
     # ------------------------------------------------------------------
-    def apply_obs_drop(self, batch):
-        if self.obs_drop_type == "gaussian":
-            obs_drop_scale = get_scale(
-                scheduler=self.obs_drop_schedule_type,
-                start=self.gaussian_start,
-                end=self.gaussian_end,
-                cur_step=self.progress,
-                max_step=1,
-                ratio=self.gaussian_ratio
-            )
-        else:
-            if self.obs_drop_schedule_type == "constant":
-                obs_drop_scale = 1
-            elif self.obs_drop_schedule_type == "linear":
-                obs_drop_scale = self.progress
-            else:
-                raise ValueError(f"Unsupported obs_drop_schedule_type {self.obs_drop_schedule_type}")
-            obs_drop = self.obs_drop * obs_drop_scale
-
-        if self.obs_drop_type == "gaussian" or (self.obs_drop > 0.0 and obs_drop_scale > 0.0):
-            for key in self.obs_drop_keys:
-                batch_size = next(iter(batch['obs'].values())).shape[0]
-                if key in batch['obs']:
-                    if self.obs_drop_type == 'gaussian':
-                        assert len(batch['obs'][key].shape) == 5, "Gaussian dropout only supports 5D obs"
-                        batch['obs'][key] = gaussian_2d_smoothing_separate(batch['obs'][key], scale=obs_drop_scale)
-                    else:
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        if self.obs_drop_type == 'zero':
-                            batch['obs'][key][drop_obs_mask] = 0.0
-                        elif self.obs_drop_type == 'learnable':
-                            raise NotImplementedError("learnable obs_drop_type is not yet implemented")
-                        elif self.obs_drop_type == 'noise':
-                            batch['obs'][key][drop_obs_mask] = self.obs_drop_noise_scale * torch.randn_like(batch['obs'][key][drop_obs_mask])
-
-                if 'extended_obs' in batch and key in batch['extended_obs']:
-                    if self.obs_drop_type == 'zero':
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        batch['extended_obs'][key][drop_obs_mask] = 0.0
-                    elif self.obs_drop_type == 'noise':
-                        drop_obs_mask = torch.rand(batch_size) < obs_drop
-                        batch['extended_obs'][key][drop_obs_mask] = self.obs_drop_noise_scale * torch.randn_like(batch['extended_obs'][key][drop_obs_mask])
 
     def _compute_act_loss(self,
                           action: torch.Tensor,
@@ -735,7 +529,7 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
                                  act_loss_vec_conf: torch.Tensor,
                                  loss_mask=None):
         if self.confidence_head is None:
-            return None, None, None
+            return None, None, None, None
 
         log_sigma_raw = self._compute_confidence_logits(obs_tokens)
         if log_sigma_raw is None:
@@ -744,46 +538,27 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
         log_sigma = log_sigma_raw[loss_mask] if loss_mask is not None else log_sigma_raw
         act_loss_masked = act_loss_vec_conf[loss_mask] if loss_mask is not None else act_loss_vec_conf
         sigma = 1.0 + torch.exp(log_sigma)
-        sigma_stats = sigma
         log_sigma_term = torch.log(sigma)
         act_loss_normalized = act_loss_masked
         gamma = self.confidence_gamma
         alpha = self.confidence_alpha
         act_conf_loss = gamma * act_loss_normalized * sigma - alpha * log_sigma_term
         act_conf_loss = act_conf_loss.mean()
-        return act_conf_loss, log_sigma, sigma_stats, act_loss_normalized
+        return act_conf_loss, log_sigma, sigma, act_loss_normalized
 
     def compute_loss(self, batch: Dict[str, torch.Tensor], loss_mask=None):
-        """
-        Compute total loss using dual encoder architecture:
-        - ACT encoder -> obs_tokens_a -> ACT model -> action
-        - Confidence encoder -> obs_tokens_b -> Confidence head -> log_sigma
-        
-        Total loss = ACT_loss + Confidence_loss
-        """
         action = batch['action']
         T_action = action.shape[1]
-
-        self.apply_obs_drop(batch)
 
         obs_dict = batch['obs']
         extended_obs_dict = batch.get('extended_obs', None)
 
         # ===== ACT path: use ACT encoder =====
-        obs_tokens_act, temporal_cond_act = self._predict_obs_tokens(
-            obs_dict, extended_obs_dict, 
-            encoder_type='act',
-            return_temporal_cond=True
-        )
+        obs_tokens_act, temporal_cond_act = self._predict_obs_tokens(obs_dict, extended_obs_dict, encoder_type='act', return_temporal_cond=True)
 
         # ===== Confidence path: use confidence encoder =====
-        obs_tokens_conf, temporal_cond_conf = self._predict_obs_tokens(
-            obs_dict, extended_obs_dict, 
-            encoder_type='confidence',
-            return_temporal_cond=True
-        )
+        obs_tokens_conf, temporal_cond_conf = self._predict_obs_tokens(obs_dict, extended_obs_dict, encoder_type='confidence', return_temporal_cond=True)
 
-        # Compute temporal conditioning for ACT
         if extended_obs_dict is not None and len(self.extented_obs_keys) > 0:
             first_val = next(iter(extended_obs_dict.values()))
             T_extended = first_val.shape[1]
@@ -797,7 +572,6 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
         else:
             temporal_cond_act = None
 
-        # Compute ACT loss using ACT encoder
         act_loss, act_loss_vec, act_loss_vec_conf, act_loss_vec_virtual = self._compute_act_loss(
             action, obs_tokens_act, temporal_cond_act, loss_mask
         )
@@ -806,7 +580,6 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
         sigma_stats = None
         act_conf_loss = None
         
-        # Compute confidence loss using confidence encoder
         if self.confidence_head is not None:
             act_conf_loss, log_sigma, sigma_stats, act_loss_normalized = self._compute_confidence_loss(
                 obs_tokens_conf, act_loss_vec_conf, loss_mask
@@ -820,7 +593,7 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
         if act_conf_loss is not None:
             weighted_virtual = masked_virtual * sigma_stats.detach()
             virtual_loss_component = weighted_virtual.mean()
-            total_loss = act_loss + virtual_loss_component + act_conf_loss
+            total_loss = virtual_loss_component + act_conf_loss
         else:
             total_loss = act_loss
 
@@ -863,27 +636,12 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
 
         optim_groups = []
 
-        # RNN encoders
         if self.rnn_act_encoder is not None:
             optim_groups += self.rnn_act_encoder.get_optim_groups(weight_decay=weight_decay)
         if self.rnn_confidence_encoder is not None and self.rnn_confidence_encoder is not self.rnn_act_encoder:
             optim_groups += self.rnn_confidence_encoder.get_optim_groups(weight_decay=weight_decay)
 
-        # VQ
-        if self.vq is not None:
-            optim_groups += [{
-                "params": self.vq.parameters(),
-                "weight_decay": 0.0,
-            }]
 
-        # Force encoder
-        if self.force_encoder is not None:
-            optim_groups += [{
-                "params": self.force_encoder.parameters(),
-                "weight_decay": weight_decay,
-            }]
-
-        # Confidence head
         if self.confidence_head is not None:
             if hasattr(self.confidence_head, 'get_optim_groups'):
                 optim_groups += self.confidence_head.get_optim_groups(weight_decay=weight_decay)
@@ -893,7 +651,7 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
                     "weight_decay": weight_decay,
                 }]
 
-        # ACT encoder parameters
+
         act_encoder_params = []
         other_obs_params = []
         for key, value in self.act_encoder.named_parameters():
@@ -913,7 +671,6 @@ class ACTConfidenceDualEncoderPolicy(BaseImagePolicy):
                 "weight_decay": obs_encoder_weight_decay
             })
 
-        # Confidence encoder parameters (separate from ACT encoder)
         if self.confidence_encoder is not self.act_encoder:
             conf_encoder_params = []
             conf_other_params = []
