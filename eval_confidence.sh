@@ -1,7 +1,7 @@
 #!/bin/bash
 
 TASK="dual_switch"
-DATASET_VERSION="v3.1"
+DATASET_VERSION="v4.2"
 ROUND="1"
 
 # ============================================================
@@ -14,12 +14,14 @@ ROUND="1"
 #   train_hybrid_diffusion_act_workspace
 #   train_hybrid_diffusion_act_stagewise_workspace
 # ============================================================
-CONFIG_NAME="train_act_confidence_stagewise_workspace"
+CONFIG_NAME="train_hybrid_diffusion_act_stagewise_workspace"
 
 # ============================================================
 # Checkpoint path（根据使用的策略切换）
 # ============================================================
-CKPT_PATH="/mnt/workspace/users/lifeng/reactive_transformer_diffusion_policy/data/outputs/2026.03.16/22.42-07_dual_switch_v3_to_v3_4_act_confidence_stagewise_policy_round_1_stage2/checkpoints/latest.ckpt"
+#/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.03.19/17.35-15_dual_switch_v3_to_v3_4_act_confidence_stagewise_policy_round_1_stage2/checkpoints 
+#/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.03.19/17.27-14_dual_switch_v3_to_v3_4_act_confidence_stagewise_policy_round_1_stage2/checkpoints
+CKPT_PATH="/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.03.27/15.34-16_dual_switch_v4_hybrid_stagewise_round_1_stage3/checkpoints/latest.ckpt"
 
 # Dataset path
 DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr"
@@ -32,7 +34,7 @@ VIDEO_FPS=1
 NUM_INFERENCE_STEPS=8
 
 # Output directory for videos
-OUTPUT_DIR="evaluations_stagewise_800_250_collabation_act"
+OUTPUT_DIR="evaluations_stagewise_800_250_collabation_hybrid_range_new"
 
 # ============================================================
 # 根据 CONFIG_NAME 自动推导 transforms override，关闭随机数据增强
@@ -69,7 +71,7 @@ echo ""
 
 export CKPT_PATH="${CKPT_PATH}"
 export OUTPUT_DIR="${OUTPUT_DIR}"
-python evaluate_confidence.py \
+python eval_confidence.py \
     --config-name ${CONFIG_NAME} \
     task=real_${TASK}_image_wrench_offline_rl_10fps_acp \
     task.dataset_path=${DATASET_PATH} \
@@ -79,9 +81,6 @@ python evaluate_confidence.py \
     +video_fps=${VIDEO_FPS} \
     +device=${GPU_DEVICE} \
     task.dataset.val_ratio=0.0 \
-    task.dataset.only_use_success_episodes=False \
-    task.dataset.use_noisy_episodes=False \
-    task.dataset.resume_params_path=null \
     "${TRANSFORMS_OVERRIDE[@]}"
 
 echo ""

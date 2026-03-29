@@ -5,8 +5,8 @@
 NUM_GPUS=8  # Change this to use different number of GPUs: 1, 2, 4, 8
 
 TASK="dual_switch"
-STAGE1_DATASET_VERSION="v3"
-STAGE2_DATASET_VERSION="v3.4"
+STAGE1_DATASET_VERSION="v4"
+STAGE2_DATASET_VERSION="v4.1"
 ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness"
 TRAINING_DEBUG=False
 USE_AMP_FOR_POLICY=False
@@ -14,17 +14,16 @@ AMP_DTYPE_FOR_POLICY="bf16"
 LOGGING_MODE="online"
 
 # Policy: "act_confidence_stagewise"、"act_confidence_dual_encoder_stagewise"、"hybrid_stagewise"
-POLICY_TYPE="act_confidence_stagewise"
+POLICY_TYPE="hybrid_stagewise"
 
 ROUND=1
 POLICY_PRETRAINED_CKPT_PATH="null"
 REWARD_PRETRAINED_CKPT_PATH="null"
 CRITIC_PRETRAINED_CKPT_PATH="null"
-DATASET_RESUME_PARAMS_PATH="null"
 
 # Stagewise training config
-STAGE1_EPOCHS=800
-STAGE2_EPOCHS=250 
+STAGE1_EPOCHS=400
+STAGE2_EPOCHS=600 
 STAGE3_EPOCHS=250 #only for hybrid_stagewise
 TOTAL_EPOCHS=$((STAGE1_EPOCHS + STAGE2_EPOCHS + STAGE3_EPOCHS))
 
@@ -144,9 +143,6 @@ COMMON_TRAIN_ARGS=(
     task=${TASK_CONFIG}
     policy.use_amp_for_inference=${USE_AMP_FOR_POLICY}
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY}
-    task.dataset.resume_params_path=${DATASET_RESUME_PARAMS_PATH}
-    task.dataset.use_noisy_episodes=True
-    task.dataset.only_use_success_episodes=True
     training.use_amp=${USE_AMP_FOR_POLICY}
     training.amp_dtype=${AMP_DTYPE_FOR_POLICY}
     training.debug=${TRAINING_DEBUG}

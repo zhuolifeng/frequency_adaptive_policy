@@ -20,7 +20,6 @@ class ACTTransformer(ModuleAttrMixin):
                  max_cond_tokens: int = 800,
                  max_action_history: int = 32,
                  p_drop_attn: float = 0.1,
-                 use_second_cross_attention: bool = False,
                  ) -> None:
         super().__init__()
         
@@ -43,12 +42,10 @@ class ACTTransformer(ModuleAttrMixin):
                 dropout=p_drop_attn,
                 activation='gelu',
                 batch_first=True,
-                norm_first=True,
-                use_second_cross_attention=use_second_cross_attention
+                norm_first=True
             )
             for _ in range(n_layer)
         ])
-        self.use_second_cross_attention = use_second_cross_attention
         
         self.ln_f = nn.LayerNorm(n_emb)
         self.head = nn.Linear(n_emb, action_dim)

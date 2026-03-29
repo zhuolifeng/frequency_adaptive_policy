@@ -84,7 +84,6 @@ policy:
     max_cond_tokens: 800
     max_action_history: 32
     p_drop_attn: 0.1
-    use_second_cross_attention: False
   
   n_emb: ${n_emb}
   horizon: ${horizon}

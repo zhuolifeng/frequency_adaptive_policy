@@ -1,0 +1,54 @@
+defaults:
+  - real_robot_env@_here_
+  - _self_
+
+teleop_server: null
+
+
+robot_server:
+  right_enable_tdk: True
+  right_leader_sn: "Rizon4R-062086"
+
+kineteach_controller:
+  host_ip: "127.0.0.1"
+  port: 8082
+  fps: 10
+  # teleoperation mode
+  robot_control_mode: 'right_arm_6DOF'
+  use_external_control: True
+  # kinematic teaching params
+  # stiffness_ratio: [0.005, 0.005, 0.005, 0.00025, 0.00025, 0.00025]
+  stiffness_ratio: [0.002, 0.002, 0.002, 0.0001, 0.0001, 0.0001]
+  damping: [0.6, 0.6, 0.6, 0.6, 0.6, 0.6]
+  # Low-pass filter parameter (0-1, smaller value means stronger smoothing)
+  filter_alpha: 1 # do not use low-pass filter
+  key_debounce_time: 0.5
+
+publisher:
+  robot_publisher:
+    fps: 50
+    sensor_stacks:
+      right_tcp_pose: 5
+      right_tcp_wrench: 5
+  # one USB camera
+  realsense_camera_publisher: null
+  # one iPhone camera (Record3D)
+  # add more items in this list if you want multiple iPhones
+  iphone_camera_publisher:
+    - camera_name: 'right_wrist_camera'
+      camera_type: 'iphone'
+      fps: 30
+      # camera_index is assigned by device mapping server; keep a default here for standalone test
+      camera_index: 0
+      cpu_core_id:
+        - 8
+        - 9
+        - 10
+  usb_camera_publisher:
+    - camera_name: 'external_camera'
+      camera_type: 'USB'
+      fps: 10
+      cpu_core_id:
+        - 11
+        - 12
+        - 13

@@ -1,5 +1,5 @@
 defaults:
-  - real_dual_switch_two_usb_camera_24_48fps@_here_
+  - real_dual_switch_iphone_usb_camera_30_10fps@_here_
   - _self_
 
 name: real_dual_switch_image_wrench_offline_rl_10fps_acp
@@ -146,7 +146,7 @@ env_runner:
     debug: False
 
 dataset:
-  _target_: ImplicitRDP.dataset.real_image_tactile_dataset.RealImageTactileRLDataset
+  _target_: ImplicitRDP.dataset.real_image_tactile_dataset.RealImageTactileDataset
   shape_meta: ${task.shape_meta}
   dataset_path: ${task.dataset_path}
   horizon: ${horizon}
@@ -161,10 +161,5 @@ dataset:
   delta_action: False
   relative_action: True
   rpy_for_rotation: True
-  random_append_obs: False
-  random_append_n_obs: 2
-  use_noisy_episodes: False
-  only_use_success_episodes: False
-  only_use_human_data: False
-  resume_params_path: /path/to/resume_params.pkl
+
 

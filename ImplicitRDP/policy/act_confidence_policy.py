@@ -33,7 +33,7 @@ class ACTConfidencePolicy(BaseImagePolicy):
                  confidence_alpha: float = 0.2,
                  confidence_log_sigma_min: float = -5.0,
                  confidence_log_sigma_max: float = 5.0,
-                 confidence_clamp_log_sigma: bool = True,
+                 confidence_clamp_log_sigma: bool = False,
                  confidence_obs_encoder_n_layers: int = 2,
                  confidence_obs_encoder_hidden_dim: Optional[int] = None,
                  use_confidence_head: bool = True,

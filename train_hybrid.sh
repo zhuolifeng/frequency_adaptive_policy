@@ -5,7 +5,7 @@
 GPU_ID=0
 
 TASK="dual_switch"
-DATASET_VERSION="v3"
+DATASET_VERSION="v4"
 ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness"
 #ACTION_TYPE="right_arm_6DOF"
 TRAINING_DEBUG=False
@@ -20,7 +20,6 @@ ROUND=1
 POLICY_PRETRAINED_CKPT_PATH="null"
 REWARD_PRETRAINED_CKPT_PATH="null"
 CRITIC_PRETRAINED_CKPT_PATH="null"
-DATASET_RESUME_PARAMS_PATH="null"
 #--------------------------------
 
 # if round <= 1, use offline RL config
@@ -98,9 +97,6 @@ COMMON_TRAIN_ARGS=(
     task.name=${POLICY_TASK_NAME}
     policy.use_amp_for_inference=${USE_AMP_FOR_POLICY}
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY}
-    task.dataset.resume_params_path=${DATASET_RESUME_PARAMS_PATH}
-    task.dataset.use_noisy_episodes=True
-    task.dataset.only_use_success_episodes=True
     training.num_epochs=${POLICY_NUM_EPOCHS}
     training.use_amp=${USE_AMP_FOR_POLICY}
     training.amp_dtype=${AMP_DTYPE_FOR_POLICY}
