@@ -119,6 +119,16 @@ class ROS2DataConverter:
         # We don't need to un-normalize the marker locations and offsets
         return marker_locations, marker_offsets
 
+    def decode_joint_state_stack(self, msg: JointState, element_dim: int) -> np.ndarray:
+        data = np.asarray(msg.position, dtype=np.float32)
+        if data.size == 0:
+            return np.zeros((0, element_dim), dtype=np.float32)
+        if data.size % element_dim != 0:
+            raise ValueError(
+                f"Invalid JointState stack size {data.size}, cannot reshape to (*, {element_dim})"
+            )
+        return data.reshape(-1, element_dim)
+
     def convert_depth_camera(self, topic_dict: Dict) -> \
             Tuple[List[Optional[np.ndarray]], List[Optional[np.ndarray]]]:
         point_cloud_list = []
@@ -196,6 +206,15 @@ class ROS2DataConverter:
             'rightRobotGripperState': right_gripper_state,
         }
 
+        if '/left_tcp_wrench_stack' in topic_dict:
+            sensor_msg_args['leftRobotTCPWrenchStack'] = self.decode_joint_state_stack(
+                topic_dict['/left_tcp_wrench_stack'], element_dim=6
+            )
+        if '/right_tcp_wrench_stack' in topic_dict:
+            sensor_msg_args['rightRobotTCPWrenchStack'] = self.decode_joint_state_stack(
+                topic_dict['/right_tcp_wrench_stack'], element_dim=6
+            )
+
         if depth_camera_pointcloud_list[0] is not None:
             sensor_msg_args['externalCameraPointCloud'] = depth_camera_pointcloud_list[0]
         if depth_camera_rgb_list[0] is not None:
@@ -242,4 +261,3 @@ class ROS2DataConverter:
         
     
  
-

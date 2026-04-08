@@ -72,6 +72,7 @@ class TrainHybridDiffusionACTStagewiseWorkspace(BaseWorkspace):
         self.stage1_epochs = cfg.training.get('stage1_epochs', 300)
         self.stage2_epochs = cfg.training.get('stage2_epochs', 600)
         self.stage3_epochs = cfg.training.get('stage3_epochs', 250)
+        self.stage3_dataset_path = cfg.training.get('stage3_dataset_path', None)
         self.current_stage = 1
         
         
@@ -79,6 +80,17 @@ class TrainHybridDiffusionACTStagewiseWorkspace(BaseWorkspace):
         logger.info(f"  Stage 1: {self.stage1_epochs} epochs (ACT only, freeze DP + Confidence)")
         logger.info(f"  Stage 2: {self.stage2_epochs} epochs (ACT + DP, freeze Confidence)")
         logger.info(f"  Stage 3: {self.stage3_epochs} epochs (Confidence only)")
+        if self.stage3_dataset_path is None:
+            logger.info(f"  Stage 3 dataset: same as Stage 1/2 ({cfg.task.dataset_path})")
+        else:
+            logger.info(f"  Stage 3 dataset: {self.stage3_dataset_path}")
+
+        # Stage 1/2 dataset
+        self._dataset_stage12_cfg = cfg.task.dataset
+        # Stage 3 dataset: copy cfg and replace dataset_path
+        self._dataset_stage3_cfg = OmegaConf.create(OmegaConf.to_container(cfg.task.dataset, resolve=True))
+        stage3_dataset_path = self.stage3_dataset_path if self.stage3_dataset_path is not None else cfg.task.dataset_path
+        self._dataset_stage3_cfg['dataset_path'] = stage3_dataset_path
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -135,8 +147,13 @@ class TrainHybridDiffusionACTStagewiseWorkspace(BaseWorkspace):
 
         # configure dataset
         dataset: BaseImageDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
+        dataset = hydra.utils.instantiate(self._dataset_stage12_cfg)
         assert isinstance(dataset, BaseImageDataset)
+
+        dataset_stage3: BaseImageDataset
+        dataset_stage3 = hydra.utils.instantiate(self._dataset_stage3_cfg)
+        assert isinstance(dataset_stage3, BaseImageDataset)
+        self._dataset_stage3 = dataset_stage3
 
         dataloader_cfg = OmegaConf.to_container(cfg.dataloader, resolve=True)
         val_dataloader_cfg = OmegaConf.to_container(cfg.val_dataloader, resolve=True)
@@ -387,7 +404,6 @@ class TrainHybridDiffusionACTStagewiseWorkspace(BaseWorkspace):
                     # Save stage 1 checkpoint
                     if accelerator.is_main_process:
                         stage1_ckpt_path = os.path.join(self.output_dir, 'checkpoints', 'stage1_final.ckpt')
-                        model_to_save = accelerator.unwrap_model(self.model)
                         self.save_checkpoint(path=stage1_ckpt_path)
                         logger.info(f"Saved Stage 1 checkpoint to {stage1_ckpt_path}")
                     
@@ -399,9 +415,24 @@ class TrainHybridDiffusionACTStagewiseWorkspace(BaseWorkspace):
                         unwrapped_model.set_training_stage(2)
                     self.optimizer = unwrapped_model.get_optimizer(**optimizer_cfg)
                     
-                    # Re-prepare with new optimizer
+                    # Reset GradScaler for Stage 2 to avoid stale state
+                    if self.scaler is not None:
+                        self.scaler = GradScaler()
+                    
+                    # Rebuild lr_scheduler for Stage 2 with correct total steps
+                    num_steps_stage2 = (len(train_dataloader) * self.stage2_epochs) \
+                        // cfg.training.gradient_accumulate_every
+                    lr_scheduler_stage2 = get_scheduler(
+                        cfg.training.lr_scheduler,
+                        optimizer=self.optimizer,
+                        num_warmup_steps=cfg.training.lr_warmup_steps,
+                        num_training_steps=num_steps_stage2,
+                        last_epoch=-1
+                    )
+                    
+                    # Re-prepare with new optimizer and lr_scheduler
                     train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
-                        train_dataloader, val_dataloader, unwrapped_model, self.optimizer, lr_scheduler
+                        train_dataloader, val_dataloader, unwrapped_model, self.optimizer, lr_scheduler_stage2
                     )
                     
                     if accelerator.state.num_processes > 1:
@@ -411,7 +442,7 @@ class TrainHybridDiffusionACTStagewiseWorkspace(BaseWorkspace):
                             find_unused_parameters=True
                         )
                     
-                    logger.info("Optimizer rebuilt for Stage 2!")
+                    logger.info("Optimizer and lr_scheduler rebuilt for Stage 2!")
                 
                 # Stage 2 -> Stage 3 transition
                 if self.stage3_epochs > 0 and local_epoch_idx == self.stage1_epochs + self.stage2_epochs - 1:
@@ -420,31 +451,65 @@ class TrainHybridDiffusionACTStagewiseWorkspace(BaseWorkspace):
                     # Save stage 2 checkpoint
                     if accelerator.is_main_process:
                         stage2_ckpt_path = os.path.join(self.output_dir, 'checkpoints', 'stage2_final.ckpt')
-                        model_to_save = accelerator.unwrap_model(self.model)
                         self.save_checkpoint(path=stage2_ckpt_path)
                         logger.info(f"Saved Stage 2 checkpoint to {stage2_ckpt_path}")
-                    
-                    # Rebuild optimizer for stage 3 (only confidence_head parameters)
-                    logger.info("Rebuilding optimizer for Stage 3...")
-                    optimizer_cfg = OmegaConf.to_container(cfg.optimizer, resolve=True)
-                    unwrapped_model = accelerator.unwrap_model(self.model)
-                    if hasattr(unwrapped_model, 'set_training_stage'):
-                        unwrapped_model.set_training_stage(3)
-                    self.optimizer = unwrapped_model.get_optimizer(**optimizer_cfg)
-                    
-                    # Re-prepare with new optimizer
-                    train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
-                        train_dataloader, val_dataloader, unwrapped_model, self.optimizer, lr_scheduler
-                    )
-                    
-                    if accelerator.state.num_processes > 1:
-                        self.model = torch.nn.parallel.DistributedDataParallel(
-                            accelerator.unwrap_model(self.model),
-                            device_ids=[self.model.device],
-                            find_unused_parameters=True
+
+                    # Switch DataLoader and normalizer to Stage 3 dataset
+                    if self._dataset_stage3 is not None and self._dataset_stage3 is not dataset:
+                        logger.info(f"Switching to Stage 3 dataset: {self.stage3_dataset_path}")
+
+                        # Rebuild DataLoader for stage 3 dataset
+                        new_train_dataset = self._dataset_stage3
+                        new_val_dataset = self._dataset_stage3.get_validation_dataset()
+                        new_train_dataloader = DataLoader(new_train_dataset, **dataloader_cfg)
+                        new_val_dataloader = DataLoader(new_val_dataset, **val_dataloader_cfg)
+
+                        # Compute and switch normalizer for stage 3 dataset
+                        normalizer_path_stage3 = os.path.join(self.output_dir, 'normalizer_stage3.pkl')
+                        if accelerator.is_main_process:
+                            normalizer_stage3 = self._dataset_stage3.get_normalizer()
+                            pickle.dump(normalizer_stage3, open(normalizer_path_stage3, 'wb'))
+                            logger.info(f"Saved Stage 3 normalizer to {normalizer_path_stage3}")
+                        accelerator.wait_for_everyone()
+                        normalizer_stage3 = pickle.load(open(normalizer_path_stage3, 'rb'))
+                        logger.info("Normalizer switched to Stage 3 dataset normalizer")
+
+                        # Rebuild optimizer for stage 3 (only confidence_head parameters)
+                        logger.info("Rebuilding optimizer for Stage 3...")
+                        optimizer_cfg = OmegaConf.to_container(cfg.optimizer, resolve=True)
+                        unwrapped_model = accelerator.unwrap_model(self.model)
+                        if hasattr(unwrapped_model, 'set_training_stage'):
+                            unwrapped_model.set_training_stage(3)
+                        self.optimizer = unwrapped_model.get_optimizer(**optimizer_cfg)
+                        
+                        # Reset GradScaler for Stage 3 to avoid stale state
+                        if self.scaler is not None:
+                            self.scaler = GradScaler()
+                        
+                        # Rebuild lr_scheduler for Stage 3 with correct total steps
+                        num_steps_stage3 = (len(new_train_dataloader) * self.stage3_epochs) \
+                            // cfg.training.gradient_accumulate_every
+                        lr_scheduler_stage3 = get_scheduler(
+                            cfg.training.lr_scheduler,
+                            optimizer=self.optimizer,
+                            num_warmup_steps=cfg.training.lr_warmup_steps,
+                            num_training_steps=num_steps_stage3,
+                            last_epoch=-1
                         )
-                    
-                    logger.info("Optimizer rebuilt for Stage 3!")
+
+                        # Re-prepare DataLoader + optimizer + lr_scheduler together
+                        train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
+                            new_train_dataloader, new_val_dataloader, unwrapped_model, self.optimizer, lr_scheduler_stage3
+                        )
+
+                        if accelerator.state.num_processes > 1:
+                            self.model = torch.nn.parallel.DistributedDataParallel(
+                                accelerator.unwrap_model(self.model),
+                                device_ids=[self.model.device],
+                                find_unused_parameters=True
+                            )
+
+                        logger.info("Dataset, normalizer, optimizer rebuilt for Stage 3!")
                 
                 # ========= eval end for this epoch ==========
                 # end of epoch

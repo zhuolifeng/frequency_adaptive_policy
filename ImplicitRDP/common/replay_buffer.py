@@ -416,6 +416,18 @@ class ReplayBuffer:
     def __contains__(self, key):
         return key in self.data
 
+    def flatten_stacks(self, stacks_to_flatten):
+        sensor_stacks = dict()
+        for key in stacks_to_flatten:
+            if key == "action_stack":
+                sensor_stacks["action_50hz"] = self.data["action_stack"].shape[1]
+                self.data["action_50hz"] = self.data["action_stack"].reshape(-1, self.data["action_stack"].shape[2])
+                del self.data["action_stack"]
+            else:
+                sensor_stacks[key] = self.data[key].shape[1]
+                self.data[key] = self.data[key].reshape(-1, self.data[key].shape[2])
+        return sensor_stacks
+        
     # =========== our API ==============
     @property
     def n_steps(self):

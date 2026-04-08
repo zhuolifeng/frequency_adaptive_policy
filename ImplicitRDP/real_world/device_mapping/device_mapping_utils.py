@@ -17,6 +17,13 @@ def get_topic_and_type(device_to_topic: DeviceToTopic):
         subs_name_type.append((f'/{camera_name}/color/image_raw', Image))
         subs_name_type.append((f'/{camera_name}/marker_offset/information', PointCloud2))
 
+    for camera_name, info in device_to_topic.iphone.items():
+        logger.debug(f'iphone camera info: {info}')
+        subs_name_type.append((f'/{camera_name}/color/image_raw', Image))
+    
+    for name, stack_size in device_to_topic.sensor_stacks.items():
+        subs_name_type.append((f'/{name}_stack', JointState))
+
     subs_name_type.extend([
         ('/left_tcp_pose', PoseStamped),
         ('/right_tcp_pose', PoseStamped),
@@ -26,6 +33,10 @@ def get_topic_and_type(device_to_topic: DeviceToTopic):
         ('/right_tcp_vel', TwistStamped),
         ('/left_tcp_wrench', WrenchStamped),
         ('/right_tcp_wrench', WrenchStamped),
+        ('/left_is_default_cartesian_impedance', JointState),
+        ('/right_is_default_cartesian_impedance', JointState),
+        ('/left_desired_tcp_pose', PoseStamped),
+        ('/right_desired_tcp_pose', PoseStamped),
     ])
 
     return subs_name_type

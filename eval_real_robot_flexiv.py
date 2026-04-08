@@ -7,6 +7,8 @@ from omegaconf import OmegaConf
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
+from ImplicitRDP.policy.hybrid_diffusion_act_policy import HybridDiffusionACTPolicy
+from ImplicitRDP.policy.hybrid_diffusion_act_stagewise_policy import HybridDiffusionACTStagewisePolicy
 
 import os
 import psutil
@@ -77,6 +79,14 @@ def main(cfg):
 
         # set inference params
         policy.num_inference_steps = 5  # DDIM inference iterations
+    elif 'hybrid' in cfg.name:
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        policy.num_inference_steps = 5
     else:
         raise NotImplementedError
 

@@ -20,6 +20,7 @@ from ImplicitRDP.real_world.publisher.realsense_camera_publisher import Realsens
 from ImplicitRDP.real_world.publisher.usb_camera_publisher import UsbCameraPublisher
 from ImplicitRDP.real_world.publisher.gelsight_camera_publisher import GelsightCameraPublisher
 from ImplicitRDP.real_world.publisher.mctac_camera_publisher import MCTacCameraPublisher
+from ImplicitRDP.real_world.publisher.iphone_camera_publisher import IPhoneCameraPublisher
 from ImplicitRDP.real_world.device_mapping.device_mapping_server import DeviceToTopic, DeviceMappingServer
 
 # add this to prevent assigning too may threads when using numpy
@@ -51,6 +52,8 @@ class CameraWorker:
             self.camera_publisher = RealsenseCameraPublisher(**camera_config)
         elif camera_config.camera_type == 'USB':
             self.camera_publisher = UsbCameraPublisher(**camera_config)
+        elif camera_config.camera_type == 'iphone':
+            self.camera_publisher = IPhoneCameraPublisher(**camera_config)
         elif camera_config.camera_type == 'gelsight':
             self.camera_publisher = GelsightCameraPublisher(**camera_config)
         elif camera_config.camera_type == 'MCTac':
@@ -132,6 +135,23 @@ def main(cfg: DictConfig):
                 p = multiprocessing.Process(target=start_camera_publisher, args=(camera_config,))
                 processes.append(p)
                 p.start()
+
+        # Handle iphone cameras
+        if hasattr(device_to_topic, 'iphone') and cfg.task.publisher.get('iphone_camera_publisher') is not None:
+            for camera_name, camera_info in device_to_topic.iphone.items():
+                camera_config = None
+                for cam in cfg.task.publisher.iphone_camera_publisher:
+                    if cam.camera_name == camera_name:
+                        camera_config = cam
+                        break
+                if camera_config:
+                    OmegaConf.set_struct(camera_config, False)
+                    camera_config.camera_index = camera_info.device_id
+                    OmegaConf.set_struct(camera_config, True)
+
+                    p = multiprocessing.Process(target=start_camera_publisher, args=(camera_config,))
+                    processes.append(p)
+                    p.start()
 
         device_mapping_thread.join()
     except KeyboardInterrupt:

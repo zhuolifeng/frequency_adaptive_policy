@@ -35,6 +35,7 @@ class BimanualRobotPublisher(Node):
                  vr_server_ip: str = '127.0.0.1',
                  vr_server_tcp_port: int = 10001,
                  vr_server_force_port: int = 10005,
+                 sensor_stacks: Optional[Dict[str, int]] = None,
                  fps: int = 120,
                  vis_wrench: bool = True,
                  debug: bool = False):
@@ -63,6 +64,48 @@ class BimanualRobotPublisher(Node):
         self.right_tcp_vel_publisher = self.create_publisher(TwistStamped, 'right_tcp_vel', 10)
         self.left_tcp_wrench_publisher = self.create_publisher(WrenchStamped, 'left_tcp_wrench', 10)
         self.right_tcp_wrench_publisher = self.create_publisher(WrenchStamped, 'right_tcp_wrench', 10)
+        
+
+        # Publishers for cartesian impedance state
+        self.left_cartesian_impedance_publisher = self.create_publisher(JointState, 'left_is_default_cartesian_impedance', 10)
+        self.right_cartesian_impedance_publisher = self.create_publisher(JointState, 'right_is_default_cartesian_impedance', 10)
+
+        # Publishers for desired TCP pose
+        self.desired_tcp_pose_left_publisher = self.create_publisher(PoseStamped, 'left_desired_tcp_pose', 10)
+        self.desired_tcp_pose_right_publisher = self.create_publisher(PoseStamped, 'right_desired_tcp_pose', 10)
+
+        # Define available sensor types and their data extraction functions
+        self.sensor_types = {
+            'left_tcp_pose': lambda states: pose_7d_to_pose_6d(np.array([states.leftRobotTCP[0], states.leftRobotTCP[1], states.leftRobotTCP[2], 
+                                           states.leftRobotTCP[3], states.leftRobotTCP[4], states.leftRobotTCP[5], states.leftRobotTCP[6]])).tolist(),
+            'right_tcp_pose': lambda states: pose_7d_to_pose_6d(np.array([states.rightRobotTCP[0], states.rightRobotTCP[1], states.rightRobotTCP[2], 
+                                            states.rightRobotTCP[3], states.rightRobotTCP[4], states.rightRobotTCP[5], states.rightRobotTCP[6]])).tolist(),
+            'left_gripper_state': lambda states: [states.leftGripperState[0], states.leftGripperState[1]],
+            'right_gripper_state': lambda states: [states.rightGripperState[0], states.rightGripperState[1]],
+            'left_tcp_vel': lambda states: [states.leftRobotTCPVel[0], states.leftRobotTCPVel[1], states.leftRobotTCPVel[2], 
+                                          states.leftRobotTCPVel[3], states.leftRobotTCPVel[4], states.leftRobotTCPVel[5]],
+            'right_tcp_vel': lambda states: [states.rightRobotTCPVel[0], states.rightRobotTCPVel[1], states.rightRobotTCPVel[2], 
+                                           states.rightRobotTCPVel[3], states.rightRobotTCPVel[4], states.rightRobotTCPVel[5]],
+            'left_tcp_wrench': lambda states: [states.leftRobotTCPWrench[0], states.leftRobotTCPWrench[1], states.leftRobotTCPWrench[2], 
+                                             states.leftRobotTCPWrench[3], states.leftRobotTCPWrench[4], states.leftRobotTCPWrench[5]],
+            'right_tcp_wrench': lambda states: [states.rightRobotTCPWrench[0], states.rightRobotTCPWrench[1], states.rightRobotTCPWrench[2], 
+                                              states.rightRobotTCPWrench[3], states.rightRobotTCPWrench[4], states.rightRobotTCPWrench[5]],
+            'left_cartesian_impedance': lambda states: [1.0 if states.leftRobotIsDefaultCartesianImpedance else 0.0],
+            'right_cartesian_impedance': lambda states: [1.0 if states.rightRobotIsDefaultCartesianImpedance else 0.0]
+        }
+        
+        # Initialize history buffers for stack sensors
+        self.sensor_stacks = sensor_stacks or {}
+        self.sensor_histories = {}
+        self.stack_publishers = {}
+        for sensor_name, stack_size in self.sensor_stacks.items():
+            if sensor_name in self.sensor_types:
+                self.sensor_histories[sensor_name] = deque(maxlen=stack_size)
+                # Create stack publisher
+                self.stack_publishers[sensor_name] = self.create_publisher(
+                    JointState, f'{sensor_name}_stack', 10
+                )
+
 
         self.timer = self.create_timer(1 / fps, self.timer_callback)
         # Create a session with robot server
@@ -218,6 +261,33 @@ class BimanualRobotPublisher(Node):
         response.raise_for_status()  # Raise an error for bad responses
         return response.json()
     
+    def update_and_publish_stacks(self, robot_states: BimanualRobotStates, timestamp):
+        """Update sensor history buffers and publish stack data"""
+        for sensor_name in self.sensor_stacks.keys():
+            if sensor_name in self.sensor_types:
+                # Extract current sensor data
+                current_data = self.sensor_types[sensor_name](robot_states)
+                
+                # Add to history buffer
+                self.sensor_histories[sensor_name].append(current_data)
+                
+                # If we have enough history data, publish stack
+                if len(self.sensor_histories[sensor_name]) == self.sensor_stacks[sensor_name]:
+                    # Flatten all historical data
+                    flattened_data = []
+                    for historical_data in self.sensor_histories[sensor_name]:
+                        flattened_data.extend(historical_data)
+                    
+                    # Create stack message
+                    stack_msg = JointState()
+                    stack_msg.header = Header()
+                    stack_msg.header.stamp = timestamp
+                    stack_msg.name = [sensor_name]
+                    stack_msg.position = flattened_data
+                    
+                    # Publish stack data
+                    self.stack_publishers[sensor_name].publish(stack_msg)
+
     def timer_callback(self):
         # this step has 0.5ms - 1ms latency
         robot_states = BimanualRobotStates.model_validate(self.send_command(f'/get_current_robot_states'))
@@ -318,6 +388,53 @@ class BimanualRobotPublisher(Node):
         right_tcp_wrench_msg.wrench.torque.y = robot_states.rightRobotTCPWrench[4]
         right_tcp_wrench_msg.wrench.torque.z = robot_states.rightRobotTCPWrench[5]
         self.right_tcp_wrench_publisher.publish(right_tcp_wrench_msg)
+        
+        # Create and publish cartesian impedance state messages
+        left_cartesian_impedance_msg = JointState()
+        left_cartesian_impedance_msg.header = Header()
+        left_cartesian_impedance_msg.header.stamp = timestamp
+        left_cartesian_impedance_msg.name = ['left_is_default_cartesian_impedance']
+        left_cartesian_impedance_msg.position = [1.0 if robot_states.leftRobotIsDefaultCartesianImpedance else 0.0]
+        self.left_cartesian_impedance_publisher.publish(left_cartesian_impedance_msg)
+
+        right_cartesian_impedance_msg = JointState()
+        right_cartesian_impedance_msg.header = Header()
+        right_cartesian_impedance_msg.header.stamp = timestamp
+        right_cartesian_impedance_msg.name = ['right_is_default_cartesian_impedance']
+        right_cartesian_impedance_msg.position = [1.0 if robot_states.rightRobotIsDefaultCartesianImpedance else 0.0]
+        self.right_cartesian_impedance_publisher.publish(right_cartesian_impedance_msg)
+
+        # Create and publish desired TCP pose messages for left arm
+        desired_tcp_pose_left_msg = PoseStamped()
+        desired_tcp_pose_left_msg.header = Header()
+        desired_tcp_pose_left_msg.header.stamp = timestamp
+        desired_tcp_pose_left_msg.header.frame_id = 'desired_tcp_left'
+        tcp_pose_left_msg.pose.position = Point(x=robot_states.leftRobotDesiredTCP[0],
+                                                y=robot_states.leftRobotDesiredTCP[1],
+                                                z=robot_states.leftRobotDesiredTCP[2])
+        tcp_pose_left_msg.pose.orientation.w = robot_states.leftRobotDesiredTCP[3]
+        tcp_pose_left_msg.pose.orientation.x = robot_states.leftRobotDesiredTCP[4]
+        tcp_pose_left_msg.pose.orientation.y = robot_states.leftRobotDesiredTCP[5]
+        tcp_pose_left_msg.pose.orientation.z = robot_states.leftRobotDesiredTCP[6]
+        self.desired_tcp_pose_left_publisher.publish(desired_tcp_pose_left_msg)
+
+        # Create and publish desired TCP pose messages for right arm
+        desired_tcp_pose_right_msg = PoseStamped()
+        desired_tcp_pose_right_msg.header = Header()
+        desired_tcp_pose_right_msg.header.stamp = timestamp
+        desired_tcp_pose_right_msg.header.frame_id = 'desired_tcp_right'
+        desired_tcp_pose_right_msg.pose.position = Point(x=robot_states.rightRobotDesiredTCP[0],
+                                                y=robot_states.rightRobotDesiredTCP[1],
+                                                z=robot_states.rightRobotDesiredTCP[2])
+        desired_tcp_pose_right_msg.pose.orientation.w = robot_states.rightRobotDesiredTCP[3]
+        desired_tcp_pose_right_msg.pose.orientation.x = robot_states.rightRobotDesiredTCP[4]
+        desired_tcp_pose_right_msg.pose.orientation.y = robot_states.rightRobotDesiredTCP[5]
+        desired_tcp_pose_right_msg.pose.orientation.z = robot_states.rightRobotDesiredTCP[6]
+        self.desired_tcp_pose_right_publisher.publish(desired_tcp_pose_right_msg)
+
+        # Update and publish sensor stacks if configured
+        if self.sensor_stacks:
+            self.update_and_publish_stacks(robot_states, timestamp)
 
         if self.vis_wrench:
             # Send complete 6-DOF wrench data (force + torque) for both arms

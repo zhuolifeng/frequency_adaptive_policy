@@ -26,6 +26,8 @@ class UsbCameraInfo(BaseModel):
 class DeviceToTopic(BaseModel):
     realsense: Dict[str, RealsenseCameraInfo] = {}
     usb: Dict[str, UsbCameraInfo] = {}
+    iphone: Dict[str, UsbCameraInfo] = {}
+    sensor_stacks: Dict[str, int] = {}
 
 class DeviceMappingServer:
     """Server class that defines the device mapping (device to ROS topic name)"""
@@ -80,12 +82,24 @@ class DeviceMappingServer:
 
         return camera_ids
 
+    @staticmethod
+    def get_iphone_camera_ids(num_devices: int):
+        """Return iPhone device indices for Record3D.
+
+        Record3D Python SDK exposes connected devices in a list, so we use
+        sequential indices by default.
+        """
+        return list(range(max(int(num_devices), 0)))
+
     def init_mapping(self, publisher_cfg: DictConfig):
         '''
         get the device ids of the cameras in sequence
         usb camera ids is a list
         '''
         usb_camera_ids = self.get_usb_camera_ids()
+        iphone_camera_ids = self.get_iphone_camera_ids(
+            0 if publisher_cfg.iphone_camera_publisher is None else len(publisher_cfg.iphone_camera_publisher)
+        )
 
         # realsence camera
         if publisher_cfg.realsense_camera_publisher is not None:
@@ -110,6 +124,20 @@ class DeviceMappingServer:
                     device_id=index,
                     type="usb"
                 )
+
+        # iphone camera (Record3D)
+        if publisher_cfg.iphone_camera_publisher is not None:
+            for index, iphone_cam in zip(iphone_camera_ids, publisher_cfg.iphone_camera_publisher):
+                self.device_to_topic_mapping.iphone[iphone_cam.camera_name] = UsbCameraInfo(
+                    topic_image=f'/{iphone_cam.camera_name}/color/image_raw',
+                    device_id=index,
+                    type="iphone"
+                )
+        # sensor stacks
+        if publisher_cfg.robot_publisher.sensor_stacks is None:
+            self.device_to_topic_mapping.sensor_stacks = {}
+        else:
+            self.device_to_topic_mapping.sensor_stacks = OmegaConf.to_container(publisher_cfg.robot_publisher.sensor_stacks)
 
     def run(self):
         logger.info(f"Device mapping server is running on {self.host_ip}:{self.port}")

@@ -30,7 +30,13 @@ shape_meta:
     right_robot_tcp_wrench:
       shape: [6]
       type: low_dim
+    right_robot_tcp_wrench_stack:
+      shape: [6]
+      type: low_dim
+      flatten: True
   action:
+    shape: [19] # (3+6 + 3+6 + 1)
+  action_stack:
     shape: [19] # (3+6 + 3+6 + 1)
 
 model_shape_meta:
@@ -52,7 +58,13 @@ model_shape_meta:
     right_robot_tcp_wrench:
       shape: [6]
       type: low_dim
+    right_robot_tcp_wrench_stack:
+      shape: [6]
+      type: low_dim
+      flatten: True
   action:
+    shape: [13] # (3+3 + 3+3 + 1)
+  action_stack:
     shape: [13] # (3+3 + 3+3 + 1)
 
 rl_shape_meta:

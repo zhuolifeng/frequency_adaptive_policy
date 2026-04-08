@@ -101,7 +101,7 @@ policy:
   act_model:
     _target_: ImplicitRDP.model.act.act_transformer.ACTTransformer
     shape_meta: ${task.model_shape_meta}
-    action_chunk_size: ${n_action_steps}
+    action_chunk_size: ${eval:'5*${horizon}'}
     n_layer: 6
     n_head: 8
     n_emb: ${n_emb}
@@ -140,9 +140,6 @@ policy:
   
   # Three-stage training settings
   training_stage: 1
-  freeze_diffusion_model: True
-  freeze_act_model: False
-  freeze_confidence_head: True
 
 ema:
   _target_: ImplicitRDP.model.diffusion.ema_model.EMAModel
@@ -193,6 +190,7 @@ training:
   stage1_epochs: 300
   stage2_epochs: 600
   stage3_epochs: 250
+  stage3_dataset_path: null
   num_epochs: stage1_epochs + stage2_epochs + stage3_epochs
   gradient_accumulate_every: 1
   # EMA destroys performance when used with BatchNorm

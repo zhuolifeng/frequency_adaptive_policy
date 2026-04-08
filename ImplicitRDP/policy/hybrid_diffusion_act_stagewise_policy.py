@@ -107,42 +107,19 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
         assert stage in [1, 2, 3], f"Invalid stage: {stage}. Must be 1, 2, or 3."
         
         self.training_stage = stage
-        
-        # Configure freeze flags based on stage
-        if stage == 1:
-            # Stage 1: Train ACT + encoder + rnn, freeze DP + Confidence
-            self.freeze_diffusion_model = True
-            self.freeze_act_model = False
-            self.freeze_confidence_head = True
-            stage_name = "Stage 1 (ACT only, freeze DP + Confidence)"
-        elif stage == 2:
-            # Stage 2: Train ACT + DP + encoder + rnn, freeze Confidence
-            self.freeze_diffusion_model = False
-            self.freeze_act_model = False
-            self.freeze_confidence_head = True
-            stage_name = "Stage 2 (ACT + DP, freeze Confidence)"
-        elif stage == 3:
-            # Stage 3: Train Confidence only, freeze all others
-            self.freeze_diffusion_model = True
-            self.freeze_act_model = True
-            self.freeze_confidence_head = False
-            stage_name = "Stage 3 (Confidence only)"
-        
-        logger.info(f"Training stage set to {stage}: {stage_name}")
-        logger.info(f"  freeze_diffusion_model: {self.freeze_diffusion_model}")
-        logger.info(f"  freeze_act_model: {self.freeze_act_model}")
-        logger.info(f"  freeze_confidence_head: {self.freeze_confidence_head}")
 
     def forward(self, batch: Dict[str, torch.Tensor], loss_mask=None):
         return self.compute_loss(batch, loss_mask)
 
     def compute_loss(self, batch: Dict[str, torch.Tensor], loss_mask=None):
-        action = batch['action'] 
-        T_action = action.shape[1]
-
+        action_act = batch['action_stack']
+        action_dp = batch['action']
+        T_action = action_dp.shape[1]
         if 'extended_obs' in batch and len(self.extented_obs_keys) > 0:
             for key, value in batch['extended_obs'].items():
                 if key in self.extented_obs_keys:
+                    if 'wrench_stack' in key:
+                        continue
                     T_extended = value.shape[1]
                     if T_extended > T_action:
                         batch['extended_obs'][key] = value[:, -T_action:, ...]
@@ -150,7 +127,6 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
                         last_step = value[:, -1:, ...]
                         padding = last_step.repeat(1, T_action - T_extended, *([1] * (len(value.shape) - 2)))
                         batch['extended_obs'][key] = torch.cat([value, padding], dim=1)
-
         # Prepare obs for loss computation
         obs_dict = batch['obs']
         extended_obs_dict = batch.get('extended_obs', None)
@@ -160,11 +136,11 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
         # ==================== Stage 1: ACT only ====================
         if self.training_stage == 1:
             obs_tokens, temporal_cond = self._predict_obs_tokens(
-                obs_dict, extended_obs_dict, return_temporal_cond=True
+                obs_dict, extended_obs_dict, return_temporal_cond=True, use_act_rnn=True
             )
             
             act_loss, act_loss_vec, act_loss_vec_conf, act_loss_vec_virtual = self._compute_act_loss(
-                action, obs_tokens, temporal_cond, loss_mask
+                action_act, obs_tokens, temporal_cond, loss_mask
             )
             
             total_loss = act_loss
@@ -190,7 +166,7 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
                 target = self.noise_scheduler.get_velocity(trajectory, noise, timesteps)
             else:
                 raise ValueError(f"Unsupported prediction type {pred_type}")
-            
+            print(f"for stage 2, we get the shape of target which are {target.shape}")
             B = trajectory.shape[0]
             device = trajectory.device
             if loss_mask is None:
@@ -203,10 +179,10 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
             diffusion_loss_mean = diffusion_loss_mean.sum() / (loss_mask.sum() + 1e-8)
             
             obs_tokens, temporal_cond = self._predict_obs_tokens(
-                obs_dict, extended_obs_dict, return_temporal_cond=True
+                obs_dict, extended_obs_dict, return_temporal_cond=True, use_act_rnn=True
             )
             act_loss, act_loss_vec, act_loss_vec_conf, act_loss_vec_virtual = self._compute_act_loss(
-                action, obs_tokens, temporal_cond, loss_mask
+                action_act, obs_tokens, temporal_cond, loss_mask
             )
             
             log_sigma = None
@@ -239,10 +215,10 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
         elif self.training_stage == 3:
             with torch.no_grad():
                 obs_tokens, temporal_cond = self._predict_obs_tokens(
-                    obs_dict, extended_obs_dict, return_temporal_cond=True
+                    obs_dict, extended_obs_dict, return_temporal_cond=True, use_act_rnn=True
                 )
                 _, _, act_loss_vec_conf, _ = self._compute_act_loss(
-                    action, obs_tokens, temporal_cond, loss_mask
+                    action_act, obs_tokens, temporal_cond, loss_mask
                 )
             
             log_sigma = None
@@ -286,16 +262,6 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
                         'confidence/log_sigma_max': log_sigma.max().item(),
                         'confidence/sigma': sigma_stats.mean().item(),
                     })
-            else:
-                # No confidence head - should not happen
-                total_loss = torch.tensor(0.0, device=action.device, requires_grad=True)
-                loss_dict = {
-                    'diffusion_loss': 0.0,
-                    'act_loss': 0.0,
-                    'confidence_loss': 0.0,
-                    'total_loss': 0.0,
-                    'training_stage': 3.0
-                }
         
         else:
             raise ValueError(f"Invalid training_stage: {self.training_stage}. Must be 1, 2, or 3.")
@@ -330,9 +296,9 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
                     "weight_decay": weight_decay,
                 })
             
-            # RNN encoder - train
-            if self.rnn_obs_encoder is not None:
-                optim_groups += self.rnn_obs_encoder.get_optim_groups(weight_decay=weight_decay)
+            # RNN encoder - train ACT RNN
+            if self.rnn_obs_encoder_act is not None:
+                optim_groups += self.rnn_obs_encoder_act.get_optim_groups(weight_decay=weight_decay)
             
             # Obs encoder - train
             if self.obs_encoder is not None:
@@ -361,9 +327,11 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
             # Diffusion model - train
             optim_groups.extend(self.diffusion_model.get_optim_groups(weight_decay=weight_decay))
             
-            # RNN encoder - train
-            if self.rnn_obs_encoder is not None:
-                optim_groups += self.rnn_obs_encoder.get_optim_groups(weight_decay=weight_decay)
+            # RNN encoder - train (both ACT and DP RNN)
+            if self.rnn_obs_encoder_dp is not None:
+                optim_groups += self.rnn_obs_encoder_dp.get_optim_groups(weight_decay=weight_decay)
+            if self.rnn_obs_encoder_act is not None:
+                optim_groups += self.rnn_obs_encoder_act.get_optim_groups(weight_decay=weight_decay)
             
             # Obs encoder - train
             if self.obs_encoder is not None:

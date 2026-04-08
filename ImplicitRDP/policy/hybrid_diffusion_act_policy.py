@@ -61,7 +61,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
             dp_warmup_epochs: int = 300,  # Epochs to train ACT only (DP weight = 0), then switch to DP (DP weight = 1)
             **kwargs):
         super().__init__()
-        print("we get confidence_head_type: ", confidence_head_type)
         action_shape = shape_meta['action']['shape']
         assert len(action_shape) == 1
         action_dim = action_shape[0]
@@ -73,18 +72,24 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         
         all_extented_obs_keys = list(shape_meta['extended_obs'].keys()) if 'extended_obs' in shape_meta else []
         self.extented_obs_keys = sorted(all_extented_obs_keys)
-        temporal_cond_dim = sum([shape_meta['extended_obs'][extented_obs_key]['shape'][-1] 
-                                 for extented_obs_key in self.extented_obs_keys])
+        temporal_cond_dim = shape_meta['extended_obs']["right_robot_tcp_wrench_stack"]['shape'][-1]
         if use_rnn_obs_encoder:
             assert len(self.extented_obs_keys) > 0, "extended_obs is required for RNNObsEncoder"
-            self.rnn_obs_encoder = RNN(
+            self.rnn_obs_encoder_act = RNN(
                 input_dim=temporal_cond_dim,
                 hidden_dim=rnn_obs_encoder_hidden_dim,
                 layer_num=rnn_obs_encoder_n_layer,
                 n_emb=n_emb,
-            )
+                )
+            self.rnn_obs_encoder_dp = RNN(
+                input_dim=temporal_cond_dim,
+                hidden_dim=rnn_obs_encoder_hidden_dim,
+                layer_num=rnn_obs_encoder_n_layer,
+                n_emb=n_emb,
+                )
         else:
-            self.rnn_obs_encoder = None
+            self.rnn_obs_encoder_act = None
+            self.rnn_obs_encoder_dp = None
         
         self.shape_meta = shape_meta
         self.obs_encoder = obs_encoder
@@ -178,6 +183,117 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
     
     def reset(self):
         self.action_history = None
+
+    def _select_inference_head_from_obs_tokens(
+        self, obs_tokens: torch.Tensor
+    ) -> str:
+        inference_head = getattr(self, 'inference_head', 'diffusion')
+        if not (self.use_confidence_based_head_selection and self.confidence_head is not None):
+            return inference_head
+
+        log_sigma = self._compute_confidence_logits(obs_tokens)
+        if log_sigma is None:
+            logger.warning(
+                "Confidence computation returned None, falling back to default inference_head"
+            )
+            return inference_head
+
+        sigma = 1.0 + torch.exp(log_sigma)
+        confidence = torch.log(sigma)
+        if confidence.numel() > 1:
+            confidence_value = confidence.mean().item()
+            logger.debug(
+                "Confidence-based head selection: "
+                f"mean_confidence={confidence_value:.4f}, "
+                f"threshold={self.confidence_threshold_for_head_selection:.4f}"
+            )
+        else:
+            confidence_value = confidence.item()
+            logger.debug(
+                "Confidence-based head selection: "
+                f"confidence={confidence_value:.4f}, "
+                f"threshold={self.confidence_threshold_for_head_selection:.4f}"
+            )
+        return 'act' if confidence_value > self.confidence_threshold_for_head_selection else 'diffusion'
+
+    def _prepare_reactive_temporal_cond(
+        self,
+        extended_obs_dict: Union[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]], None],
+        extended_obs_last_step_list: List[int],
+        use_act_rnn: bool,
+        extend_obs_pad_after: bool = False,
+    ) -> Optional[torch.Tensor]:
+        if extended_obs_dict is None:
+            return None
+
+        max_extended_obs_last_step = max(extended_obs_last_step_list)
+        target_horizon = 80 if use_act_rnn else self.action_horizon
+        extend_obs_pad_after_n = (
+            max(target_horizon - max_extended_obs_last_step, 0)
+            if extend_obs_pad_after else None
+        )
+
+        if isinstance(extended_obs_dict, list):
+            temporal_cond = [
+                (
+                    self.get_temporal_cond_act(
+                        extended_obs_dict[i],
+                        max_extended_obs_last_step,
+                        extend_obs_pad_after_n=extend_obs_pad_after_n,
+                        allow_partial=True,
+                        post_process=True,
+                    )
+                    if use_act_rnn else
+                    self.get_temporal_cond_dp(
+                        extended_obs_dict[i],
+                        max_extended_obs_last_step,
+                        extend_obs_pad_after_n=extend_obs_pad_after_n,
+                        allow_partial=True,
+                        post_process=True,
+                    )
+                )
+                for i in range(len(extended_obs_dict))
+            ]
+        else:
+            temporal_cond = (
+                self.get_temporal_cond_act(
+                    extended_obs_dict,
+                    max_extended_obs_last_step,
+                    extend_obs_pad_after_n=extend_obs_pad_after_n,
+                    allow_partial=True,
+                    post_process=True,
+                )
+                if use_act_rnn else
+                self.get_temporal_cond_dp(
+                    extended_obs_dict,
+                    max_extended_obs_last_step,
+                    extend_obs_pad_after_n=extend_obs_pad_after_n,
+                    allow_partial=True,
+                    post_process=True,
+                )
+            )
+
+        if temporal_cond is None:
+            return None
+
+        temporal_cond_list = []
+        for i, extended_obs_last_step in enumerate(extended_obs_last_step_list):
+            cond = temporal_cond[i] if isinstance(temporal_cond, list) else temporal_cond
+            if cond is None:
+                return None
+            if extended_obs_last_step < max_extended_obs_last_step:
+                padding_obs = cond[:, -1:, :].repeat(
+                    1,
+                    max_extended_obs_last_step - extended_obs_last_step,
+                    1,
+                )
+                cond = torch.cat(
+                    [cond[:, -extended_obs_last_step:, :], padding_obs],
+                    dim=-2,
+                )
+            temporal_cond_list.append(cond)
+
+        return torch.cat(temporal_cond_list, dim=0)
       
     def _compute_confidence_logits(self,
                                     obs_tokens: torch.Tensor) -> Optional[torch.Tensor]:
@@ -191,12 +307,36 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                           extended_obs_last_step: Optional[int] = None,
                           extend_obs_pad_after_n: Optional[int] = None,
                           allow_partial: bool = False,
+                          post_process: bool = False,
+                          use_act_rnn: bool = False) -> Optional[torch.Tensor]:
+        if use_act_rnn:
+            return self.get_temporal_cond_act(
+                extended_obs_dict=extended_obs_dict,
+                extended_obs_last_step=extended_obs_last_step,
+                extend_obs_pad_after_n=extend_obs_pad_after_n,
+                allow_partial=allow_partial,
+                post_process=post_process,
+            )
+        return self.get_temporal_cond_dp(
+            extended_obs_dict=extended_obs_dict,
+            extended_obs_last_step=extended_obs_last_step,
+            extend_obs_pad_after_n=extend_obs_pad_after_n,
+            allow_partial=allow_partial,
+            post_process=post_process,
+        )
+
+    def get_temporal_cond_act(self,
+                          extended_obs_dict: Optional[Dict[str, torch.Tensor]],
+                          extended_obs_last_step: Optional[int] = None,
+                          extend_obs_pad_after_n: Optional[int] = None,
+                          allow_partial: bool = False,
                           post_process: bool = False) -> Optional[torch.Tensor]:
         if extended_obs_dict is None or len(self.extented_obs_keys) == 0:
             return None
-        
+        extented_obs_keys = ["right_robot_tcp_wrench_stack"]
+
         temporal_cond = []
-        for extented_obs_key in self.extented_obs_keys:
+        for extented_obs_key in extented_obs_keys:
             if extented_obs_key not in extended_obs_dict:
                 if allow_partial:
                     continue
@@ -230,56 +370,67 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         
         temporal_cond = torch.cat(temporal_cond, dim=-1)
         
-        if post_process:
-            # inline post-processing previously implemented in _post_process_temporal_cond
-            processed_cond = temporal_cond
 
-            if self.rnn_obs_encoder is not None:
-                processed_cond = self.rnn_obs_encoder(processed_cond)
+        if post_process and self.rnn_obs_encoder_act is not None:
+            temporal_cond = self.rnn_obs_encoder_act(temporal_cond)
 
-            temporal_cond = processed_cond
-        
+        return temporal_cond
+
+    def get_temporal_cond_dp(self,
+                          extended_obs_dict: Optional[Dict[str, torch.Tensor]],
+                          extended_obs_last_step: Optional[int] = None,
+                          extend_obs_pad_after_n: Optional[int] = None,
+                          allow_partial: bool = False,
+                          post_process: bool = False) -> Optional[torch.Tensor]:
+        if extended_obs_dict is None or len(self.extented_obs_keys) == 0:
+            return None
+        extented_obs_keys = ["right_robot_tcp_wrench"]
+
+        temporal_cond = []
+        for extented_obs_key in extented_obs_keys:
+            if extented_obs_key not in extended_obs_dict:
+                if allow_partial:
+                    continue
+                raise KeyError(f"Missing extended obs key: {extented_obs_key}")
+
+            extented_obs = extended_obs_dict[extented_obs_key]
+            obs_dim = len(self.shape_meta['extended_obs'][extented_obs_key]['shape'])
+
+            if extended_obs_last_step is not None:
+                if obs_dim == 1:
+                    extented_obs = extented_obs[..., -extended_obs_last_step:, :]
+                elif obs_dim == 2:
+                    extented_obs = extented_obs[..., -extended_obs_last_step:, :, :]
+                else:
+                    raise ValueError("Only support 1d or 2d extended obs")
+
+            if extend_obs_pad_after_n is not None:
+                if obs_dim == 1:
+                    padding_obs = extended_obs_dict[extented_obs_key][..., -1:, :].repeat(1, extend_obs_pad_after_n, 1)
+                elif obs_dim == 2:
+                    padding_obs = extended_obs_dict[extented_obs_key][..., -1:, :, :].repeat(1, extend_obs_pad_after_n, 1, 1)
+                else:
+                    raise ValueError("Only support 1d or 2d extended obs")
+                extented_obs = torch.cat([padding_obs, extented_obs], dim=-2)
+
+            extented_obs = self.normalizer[f"extended_{extented_obs_key}"].normalize(extented_obs)
+            temporal_cond.append(extented_obs)
+
+        if len(temporal_cond) == 0:
+            return None
+
+        temporal_cond = torch.cat(temporal_cond, dim=-1)
+
+        if post_process and self.rnn_obs_encoder_dp is not None:
+            temporal_cond = self.rnn_obs_encoder_dp(temporal_cond)
+
         return temporal_cond
     
     def predict_action(self, 
                        *args,
                        **kwargs) -> Dict[str, torch.Tensor]:
-
-        if self.use_confidence_based_head_selection and self.confidence_head is not None:
-            obs_dict = args[0] if len(args) > 0 else kwargs.get('obs_dict')
-            extended_obs_dict = args[1] if len(args) > 1 else kwargs.get('extended_obs_dict', None)
-            
-            obs_tokens, temporal_cond = self._predict_obs_tokens(obs_dict, extended_obs_dict, return_temporal_cond=True)
-            
-            log_sigma = self._compute_confidence_logits(obs_tokens)
-            
-            if log_sigma is not None:
-                sigma = 1.0 + torch.exp(log_sigma)
-                confidence = torch.log(sigma)
-                
-                if confidence.numel() > 1:
-                    mean_confidence = confidence.mean().item()
-                    use_act = mean_confidence > self.confidence_threshold_for_head_selection
-                    logger.debug(f"Batch confidence-based head selection: mean_confidence={mean_confidence:.4f}, threshold={self.confidence_threshold_for_head_selection:.4f}, using {'ACT' if use_act else 'Diffusion'}")
-                else:
-                    confidence_value = confidence.item()
-                    use_act = confidence_value > self.confidence_threshold_for_head_selection
-                    logger.debug(f"Confidence-based head selection: confidence={confidence_value:.4f}, threshold={self.confidence_threshold_for_head_selection:.4f}, using {'ACT' if use_act else 'Diffusion'}")
-                
-                if use_act:
-                    action_history = self.action_history
-                    return self._predict_action_act_from_tokens(
-                        obs_tokens=obs_tokens,
-                        temporal_cond=temporal_cond,
-                        action_history=action_history
-                    )
-                else:
-                    return self.predict_action_diffusion(*args, **kwargs)
-            else:
-                logger.warning("Confidence computation returned None, falling back to default inference_head")
-                inference_head = getattr(self, 'inference_head', 'diffusion')
-        
-        inference_head = getattr(self, 'inference_head', 'diffusion')
+        obs_tokens = self.predict_obs_tokens(*args, **kwargs)
+        inference_head = self._select_inference_head_from_obs_tokens(obs_tokens)
         
         if inference_head == 'diffusion':
             return self.predict_action_diffusion(*args, **kwargs)
@@ -320,7 +471,8 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                             extended_obs_dict: Optional[Dict[str, torch.Tensor]] = None,
                             return_expanded_obs_tokens: bool = False,
                             return_temporal_cond: bool = False,
-                            return_action_history: bool = False
+                            return_action_history: bool = False,
+                            use_act_rnn: bool = False
                             ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """
         Normalize/encode obs and optionally return temporal_cond (post-processed) or action history.
@@ -338,28 +490,20 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
 
         # compute temporal_cond if RNN obs encoder is used (inlined from former `_encode_obs`)
         temporal_cond = None
-        if self.rnn_obs_encoder is not None:
-            if extended_obs_dict is not None:
-                temporal_cond = self.get_temporal_cond(
+        if extended_obs_dict is not None:
+            temporal_cond = (
+                self.get_temporal_cond_act(
                     extended_obs_dict,
                     allow_partial=True,
-                    post_process=True
+                    post_process=True,
                 )
-            elif len(self.extented_obs_keys) > 0:
-                extended_obs_list = []
-                for key in self.extented_obs_keys:
-                    if key in obs_dict:
-                        extended_obs_list.append(obs_dict[key])
-                if len(extended_obs_list) > 0:
-                    extended_obs_dict_local = {}
-                    for i, key in enumerate(self.extented_obs_keys):
-                        if key in obs_dict:
-                            extended_obs_dict_local[key] = obs_dict[key]
-                    temporal_cond = self.get_temporal_cond(
-                        extended_obs_dict_local,
-                        allow_partial=True,
-                        post_process=True
-                    )
+                if use_act_rnn else
+                self.get_temporal_cond_dp(
+                    extended_obs_dict,
+                    allow_partial=True,
+                    post_process=True,
+                )
+            )
 
         if return_action_history:
             return obs_tokens, temporal_cond, self.action_history
@@ -502,8 +646,8 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
 
                 t = timesteps[step_idx]
 
-                if self.rnn_obs_encoder is not None and temporal_cond_batch is not None:
-                    temporal_cond_tokens_batch = self.rnn_obs_encoder(temporal_cond_batch)
+                if self.rnn_obs_encoder_dp is not None and temporal_cond_batch is not None:
+                    temporal_cond_tokens_batch = self.rnn_obs_encoder_dp(temporal_cond_batch)
                 else:
                     temporal_cond_tokens_batch = None
 
@@ -569,111 +713,23 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                 dtype=self.dtype,
                 device=self.device
             )
+        else:
+            raise ValueError(
+                f"Unexpected obs_tokens_and_noisy_trajectory feature dim {actual_feature_dim}, "
+                f"expected obs-only multiple of {self.n_emb} or obs+noise with noise dim {expected_noise_feature_dim}"
+            )
 
         obs_tokens = obs_tokens_flat.to(self.device).reshape(B, -1, self.n_emb)
 
-        # Prepare temporal_cond similar to diffusion/act policy: compute per-sample padded/truncated temporal cond
-        if extended_obs_dict is None:
-            temporal_cond = None
-            temporal_cond_tokens = None
-            max_extended_obs_last_step = None
-            extend_obs_pad_after_n = None
-        else:
-            max_extended_obs_last_step = max(extended_obs_last_step_list)
-            if extend_obs_pad_after:
-                extend_obs_pad_after_n = self.action_horizon - max_extended_obs_last_step
-            else:
-                extend_obs_pad_after_n = None
-
-            if isinstance(extended_obs_dict, list):
-                temporal_cond = [
-                    self.get_temporal_cond(
-                        extended_obs_dict[i],
-                        max_extended_obs_last_step,
-                        extend_obs_pad_after_n=extend_obs_pad_after_n
-                    )
-                    for i in range(len(extended_obs_dict))
-                ]
-            else:
-                temporal_cond = self.get_temporal_cond(
-                    extended_obs_dict,
-                    max_extended_obs_last_step,
-                    extend_obs_pad_after_n=extend_obs_pad_after_n,
-                    post_process=True
-                )
-
-            if temporal_cond is None:
-                temporal_cond = None
-                temporal_cond_tokens = None
-            else:
-                temporal_cond_list = []
-                for i in range(B):
-                    if isinstance(temporal_cond, list):
-                        cond = temporal_cond[i]
-                    else:
-                        cond = temporal_cond
-
-                    if cond is None:
-                        temporal_cond_list.append(None)
-                        continue
-
-                    if extended_obs_last_step_list[i] < max_extended_obs_last_step:
-                        padding_obs = cond[:, -1:, :].repeat(
-                            1,
-                            max_extended_obs_last_step - extended_obs_last_step_list[i],
-                            1
-                        )
-                        temporal_cond_list.append(
-                            torch.cat([cond[:, -extended_obs_last_step_list[i]:, :], padding_obs], dim=-2)
-                        )
-                    else:
-                        temporal_cond_list.append(cond)
-
-                if any(tc is None for tc in temporal_cond_list):
-                    temporal_cond = None
-                    temporal_cond_tokens = None
-                else:
-                    temporal_cond = torch.cat(temporal_cond_list, dim=0)
-                    # For list mode (reactive transformer), temporal_cond is raw (not post-processed)
-                    # We need to post-process it manually to create temporal_cond_tokens for ACT
-                    # while keeping temporal_cond raw for diffusion
-                    B_concat, T, D = temporal_cond.shape
-                    
-                    temporal_cond_encoded = temporal_cond
-
-                    if self.rnn_obs_encoder is not None:
-                        temporal_cond_tokens = self.rnn_obs_encoder(temporal_cond_encoded)
-                    else:
-                        temporal_cond_tokens = temporal_cond_encoded
-
-        if self.use_confidence_based_head_selection and self.confidence_head is not None:
-            log_sigma = self._compute_confidence_logits(obs_tokens, None)
-            
-            if log_sigma is not None:
-                sigma = 1.0 + torch.exp(log_sigma)
-                confidence = torch.log(sigma)
-                
-                if confidence.numel() > 1:
-                    mean_confidence = confidence.mean().item()
-                    use_act = mean_confidence > self.confidence_threshold_for_head_selection
-                    logger.debug(f"Batch confidence-based head selection (reactive): mean_confidence={mean_confidence:.4f}, threshold={self.confidence_threshold_for_head_selection:.4f}, using {'ACT' if use_act else 'Diffusion'}")
-                else:
-                    confidence_value = confidence.item()
-                    use_act = confidence_value > self.confidence_threshold_for_head_selection
-                    logger.debug(f"Confidence-based head selection (reactive): confidence={confidence_value:.4f}, threshold={self.confidence_threshold_for_head_selection:.4f}, using {'ACT' if use_act else 'Diffusion'}")
-                
-                inference_head = 'act' if use_act else 'diffusion'
-                
-                if use_act and noisy_trajectory.shape[-1] > 0:
-                    noisy_trajectory = torch.zeros(
-                        (B, self.action_horizon, 0),
-                        dtype=self.dtype,
-                        device=self.device
-                    )
-            else:
-                logger.warning("Confidence computation returned None in reactive transformer, falling back to default inference_head")
+        inference_head = self._select_inference_head_from_obs_tokens(obs_tokens)
 
         if inference_head == 'diffusion':
+            temporal_cond = self._prepare_reactive_temporal_cond(
+                extended_obs_dict=extended_obs_dict,
+                extended_obs_last_step_list=extended_obs_last_step_list,
+                use_act_rnn=False,
+                extend_obs_pad_after=extend_obs_pad_after,
+            )
             return self._predict_from_obs_tokens_and_noisy_trajectory_diffusion(
                 obs_tokens,
                 noisy_trajectory,
@@ -681,7 +737,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                 extended_obs_last_step_list,
                 dataset_obs_temporal_downsample_ratio,
                 extend_obs_pad_after,
-                extend_obs_pad_after_n,
                 inpainting_action,
                 inpainting_resample_steps,
                 sample_per_trajectory,
@@ -689,10 +744,19 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                 return_noisy_trajectory
             )
         elif inference_head == 'act':
+            act_extended_obs_last_step_list = [
+                int(last_step * 5) for last_step in extended_obs_last_step_list
+            ]
+            temporal_cond = self._prepare_reactive_temporal_cond(
+                extended_obs_dict=extended_obs_dict,
+                extended_obs_last_step_list=act_extended_obs_last_step_list,
+                use_act_rnn=True,
+                extend_obs_pad_after=extend_obs_pad_after,
+            )
             return self._predict_from_obs_tokens_and_noisy_trajectory_act(
                 obs_tokens,
-                temporal_cond_tokens if temporal_cond_tokens is not None else temporal_cond,
-                extended_obs_last_step_list,
+                temporal_cond,
+                act_extended_obs_last_step_list,
                 dataset_obs_temporal_downsample_ratio,
                 sample_per_trajectory,
                 return_noisy_trajectory
@@ -707,7 +771,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                                 extended_obs_last_step_list: List[int],
                                 dataset_obs_temporal_downsample_ratio: int,
                                 extend_obs_pad_after: bool,
-                                extend_obs_pad_after_n: Optional[int],
                                 inpainting_action: torch.Tensor = None,
                                 inpainting_resample_steps: int = 1,
                                 sample_per_trajectory: Optional[int] = None,
@@ -807,8 +870,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                                 return_noisy_trajectory: bool):
         B = obs_tokens.shape[0]
         results = []
-        To = self.n_obs_steps * dataset_obs_temporal_downsample_ratio
-        start = To - 1
+        start = 13
 
         for i in range(B):
             obs_tokens_single = obs_tokens[i:i + 1]
@@ -819,9 +881,12 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                 action_history=None,
                 update_history=False
             )
-            action_chunk = action_dict['action']
+            action_chunk_full = action_dict['action']
+            act_end = min(action_chunk_full.shape[1], 80)
+            act_start = min(13, act_end)
+            action_chunk = action_chunk_full[:, act_start:act_end, :]
 
-            total_steps = temporal_cond_single.shape[1] if temporal_cond_single is not None else self.action_horizon
+            total_steps = temporal_cond_single.shape[1] if temporal_cond_single is not None else 80
             action_pred = torch.zeros(
                 (1, total_steps, self.action_dim),
                 dtype=action_chunk.dtype,
@@ -840,7 +905,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
 
             results.append({
                 'action': action_window,
-                'action_pred': action_pred
+                'action_pred': action_pred,
             })
 
         if sample_per_trajectory is not None:
@@ -872,7 +937,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                                   sample_per_trajectory: Optional[int] = None,
                                   inference_batch_size: Optional[int] = None,
                                   return_noisy_trajectory: bool = False) -> Dict[str, torch.Tensor]:
-        obs_tokens, temporal_cond = self._predict_obs_tokens(obs_dict, extended_obs_dict, return_temporal_cond=True)
+        obs_tokens, temporal_cond = self._predict_obs_tokens(obs_dict, extended_obs_dict, return_temporal_cond=True, use_act_rnn=False)
         B = obs_tokens.shape[0]
         device = obs_tokens.device
         dtype = obs_tokens.dtype
@@ -960,7 +1025,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                             obs_dict: Dict[str, torch.Tensor],
                             extended_obs_dict: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
         obs_tokens, temporal_cond, action_history = self._predict_obs_tokens(
-            obs_dict, extended_obs_dict, return_action_history=True
+            obs_dict, extended_obs_dict, return_action_history=True, use_act_rnn=True
         )
         return self._predict_action_act_from_tokens(
             obs_tokens=obs_tokens,
@@ -984,7 +1049,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                 temporal_cond=temporal_cond
             )
 
-        action_chunk = self.normalizer['action'].unnormalize(action_chunk_normalized)
+        action_chunk = self.normalizer['action_stack'].unnormalize(action_chunk_normalized)
         if update_history:
             self._update_action_history(action_chunk_normalized)
         return {'action': action_chunk}
@@ -1015,12 +1080,14 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         self.current_epoch = epoch
     
     def compute_loss(self, batch: Dict[str, torch.Tensor], loss_mask=None):
-        action = batch['action'] 
-        T_action = action.shape[1] 
-
+        action_dp = batch['action']
+        action_act = batch.get('action_stack', batch['action'])
+        T_action = action_dp.shape[1]
         if 'extended_obs' in batch and len(self.extented_obs_keys) > 0:
             for key, value in batch['extended_obs'].items():
                 if key in self.extented_obs_keys:
+                    if 'wrench_stack' in key:
+                        continue
                     T_extended = value.shape[1]
                     if T_extended > T_action:
                         batch['extended_obs'][key] = value[:, -T_action:, ...]
@@ -1053,9 +1120,14 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         
         obs_dict = batch['obs']
         extended_obs_dict = batch.get('extended_obs', None)
-        obs_tokens, temporal_cond = self._predict_obs_tokens(obs_dict, extended_obs_dict, return_temporal_cond=True)
+        obs_tokens, temporal_cond = self._predict_obs_tokens(
+            obs_dict,
+            extended_obs_dict,
+            return_temporal_cond=True,
+            use_act_rnn=True,
+        )
         act_loss, act_loss_vec, act_loss_vec_conf, act_loss_vec_virtual = self._compute_act_loss(
-            action, obs_tokens, temporal_cond, loss_mask
+            action_act, obs_tokens, temporal_cond, loss_mask
         )
         
         sigma_stats = None
@@ -1132,9 +1204,9 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         trajectory = nactions
         B = nactions.shape[0]
 
-        if self.rnn_obs_encoder is not None or self.diffusion_model.use_rnn_head:
+        if self.rnn_obs_encoder_dp is not None or self.diffusion_model.use_rnn_head:
             assert 'extended_obs' in batch, "extended_obs is required for RNNObsEncoder"
-            temporal_cond = self.get_temporal_cond(batch["extended_obs"])
+            temporal_cond = self.get_temporal_cond(batch["extended_obs"], post_process=True)
         else:
             temporal_cond = None
         
@@ -1165,17 +1237,13 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         noisy_trajectory = self.noise_scheduler.add_noise(
             trajectory, noise_new, timesteps)
         
-        if self.rnn_obs_encoder is not None and temporal_cond is not None:
-            temporal_cond_tokens = self.rnn_obs_encoder(temporal_cond)
-        else:
-            temporal_cond_tokens = None
         
         # Predict the noise residual
         pred = self.diffusion_model(
             noisy_trajectory,
             timesteps, 
             cond=obs_tokens,
-            temporal_cond=temporal_cond_tokens if temporal_cond_tokens is not None else temporal_cond
+            temporal_cond=temporal_cond
         )
         return trajectory, noise, timesteps, pred
     
@@ -1200,9 +1268,9 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         if action.shape[1] > action_chunk_size:
             history_start = max(0, action.shape[1] - action_chunk_size - self.act_model.max_action_history)
             action_history = action[:, history_start:-action_chunk_size, :]
-            action_history = self.normalizer['action'].normalize(action_history)
+            action_history = self.normalizer['action_stack'].normalize(action_history)
         
-        target_chunk_normalized = self.normalizer['action'].normalize(target_chunk)
+        target_chunk_normalized = self.normalizer['action_stack'].normalize(target_chunk)
         
         pred_actions = self.act_model.forward(
             obs_tokens=obs_tokens,
@@ -1260,8 +1328,12 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         optim_groups = self.diffusion_model.get_optim_groups(
             weight_decay=weight_decay)
 
-        if self.rnn_obs_encoder is not None:
-            optim_groups += self.rnn_obs_encoder.get_optim_groups(
+        if self.rnn_obs_encoder_dp is not None:
+            optim_groups += self.rnn_obs_encoder_dp.get_optim_groups(
+                weight_decay=weight_decay
+            )
+        if self.rnn_obs_encoder_act is not None:
+            optim_groups += self.rnn_obs_encoder_act.get_optim_groups(
                 weight_decay=weight_decay
             )
 

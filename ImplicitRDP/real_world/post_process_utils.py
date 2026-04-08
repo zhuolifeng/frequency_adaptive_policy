@@ -42,6 +42,8 @@ class DataPostProcessingManager:
         obs_dict['left_robot_tcp_pose'] = sensor_msg.leftRobotTCP
         obs_dict['left_robot_tcp_vel'] = sensor_msg.leftRobotTCPVel
         obs_dict['left_robot_tcp_wrench'] = sensor_msg.leftRobotTCPWrench
+        if sensor_msg.leftRobotTCPWrenchStack.size > 0:
+            obs_dict['left_robot_tcp_wrench_stack'] = sensor_msg.leftRobotTCPWrenchStack
         obs_dict['left_robot_gripper_width'] = sensor_msg.leftRobotGripperState[0][np.newaxis]
         obs_dict['left_robot_gripper_force'] = sensor_msg.leftRobotGripperState[1][np.newaxis]
 
@@ -49,6 +51,8 @@ class DataPostProcessingManager:
         obs_dict['right_robot_tcp_pose'] = sensor_msg.rightRobotTCP
         obs_dict['right_robot_tcp_vel'] = sensor_msg.rightRobotTCPVel
         obs_dict['right_robot_tcp_wrench'] = sensor_msg.rightRobotTCPWrench
+        if sensor_msg.rightRobotTCPWrenchStack.size > 0:
+            obs_dict['right_robot_tcp_wrench_stack'] = sensor_msg.rightRobotTCPWrenchStack
         obs_dict['right_robot_gripper_width'] = sensor_msg.rightRobotGripperState[0][np.newaxis]
         obs_dict['right_robot_gripper_force'] = sensor_msg.rightRobotGripperState[1][np.newaxis]
         

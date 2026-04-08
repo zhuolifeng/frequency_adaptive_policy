@@ -296,6 +296,8 @@ class RealStableReactiveRunner:
 
         absolute_extended_obs_dict = dict()
         for key in self.extended_lowdim_keys:
+            if self.shape_meta['extended_obs'][key].get('flatten', False) and extended_obs_dict[key].ndim >= 3:
+                extended_obs_dict[key] = extended_obs_dict[key].reshape(-1, extended_obs_dict[key].shape[-1])
             if len(self.shape_meta['extended_obs'][key]['shape']) == 1:
                 extended_obs_dict[key] = extended_obs_dict[key][:, :self.shape_meta['extended_obs'][key]['shape'][0]]
             elif len(self.shape_meta['extended_obs'][key]['shape']) == 2:
@@ -532,7 +534,11 @@ class RealStableReactiveRunner:
             assert not hasattr(policy, 'at') or not policy.at.use_rnn_decoder, "Policy should not use rnn decoder for action."
 
         if self.use_reactive_transformer:
-            assert policy.rnn_obs_encoder is not None, "Policy should use RNNObsEncoder for reactive transformer."
+            assert (
+                getattr(policy, 'rnn_obs_encoder', None) is not None
+                or getattr(policy, 'rnn_obs_encoder_act', None) is not None
+                or getattr(policy, 'rnn_obs_encoder_dp', None) is not None
+            ), "Policy should use an RNNObsEncoder for reactive transformer."
         else:
             assert not hasattr(policy, 'rnn_obs_encoder') or policy.rnn_obs_encoder is None, "Policy should not use RNNObsEncoder when not using reactive transformer."
 

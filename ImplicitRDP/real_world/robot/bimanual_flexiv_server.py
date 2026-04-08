@@ -25,11 +25,19 @@ class BimanualFlexivServer():
                  port: int = 8092,
                  use_planner: bool = False,
                  robot_control_mode: str = 'left_arm_6DOF',
+                 left_enable_tdk: bool = False,
+                 right_enable_tdk: bool = False,
+                 left_leader_sn: Optional[str] = None,
+                 right_leader_sn: Optional[str] = None,
                  ) -> None:
         self.host_ip = host_ip
         self.port = port
         self.enable_left_arm = True if 'left' in robot_control_mode or 'dual' in robot_control_mode else False
         self.enable_right_arm = True if 'right' in robot_control_mode or 'dual' in robot_control_mode else False
+        self.left_enable_tdk = left_enable_tdk
+        self.right_enable_tdk = right_enable_tdk
+        self.left_leader_sn = left_leader_sn
+        self.right_leader_sn = right_leader_sn
         
         # Check if at least one arm is enabled
         if not (self.enable_left_arm or self.enable_right_arm):
@@ -43,20 +51,34 @@ class BimanualFlexivServer():
         self.right_robot_impedance_control_status: Optional[str] = None
         
         if self.enable_left_arm:
+            if self.left_enable_tdk and self.left_leader_sn is None:
+                raise ValueError("left_leader_sn must be specified when left_enable_tdk=True")
             logger.info(f"Initializing left robot with serial number {left_robot_serial_number}")
-            self.left_robot = FlexivController(robot_serial_number=left_robot_serial_number,
-                                               gripper_name=left_gripper_name)
+            self.left_robot = FlexivController(
+                robot_serial_number=left_robot_serial_number,
+                gripper_name=left_gripper_name,
+                enable_tdk=self.left_enable_tdk,
+                leader_sn=self.left_leader_sn,
+            )
             self.left_robot.robot.SwitchMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
             # open the gripper
             self.left_robot.gripper.Move(0.1, 10, 0)
         
         if self.enable_right_arm:
+            if self.right_enable_tdk and self.right_leader_sn is None:
+                raise ValueError("right_leader_sn must be specified when right_enable_tdk=True")
             logger.info(f"Initializing right robot with serial number {right_robot_serial_number}")
-            self.right_robot = FlexivController(robot_serial_number=right_robot_serial_number,
-                                                gripper_name=right_gripper_name)
-            self.right_robot.robot.SwitchMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
-            # open the gripper
-            self.right_robot.gripper.Move(0.1, 10, 0)
+            self.right_robot = FlexivController(
+                robot_serial_number=right_robot_serial_number,
+                gripper_name=right_gripper_name,
+                enable_tdk=self.right_enable_tdk,
+                leader_sn=self.right_leader_sn,
+            )
+            if self.right_robot.enable_tdk and self.right_robot.teleop is not None:
+                pass
+            else:
+                self.right_robot.robot.SwitchMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
+                self.right_robot.gripper.Move(0, 0.10, 50)
 
         if use_planner and self.enable_left_arm and self.enable_right_arm:
             # TODO: support bimanual planner
@@ -74,6 +96,7 @@ class BimanualFlexivServer():
             'tcp_pose': [0.0] * 7,  # Default TCP pose (x, y, z, qx, qy, qz, qw)
             'tcp_vel': [0.0] * 6,   # Default TCP velocity (linear and angular)
             'ext_wrench_in_tcp': [0.0] * 6,  # Default wrench (force and torque)
+            'desired_tcp_pose': [0.0] * 7,  # Default desired TCP pose (x, y, z, qx, qy, qz, qw)
         })
         
     def _get_default_gripper_state(self):
@@ -107,9 +130,13 @@ class BimanualFlexivServer():
         @self.app.get('/get_current_robot_states')
         async def get_current_robot_states() -> BimanualRobotStates:
             # Get states for enabled robots or use defaults for disabled ones
+            left_robot_is_default_cartesian_impedance = True
+            right_robot_is_default_cartesian_impedance = True
+            
             if self.enable_left_arm:
                 left_robot_state = self.left_robot.get_current_robot_states()
                 left_robot_gripper_state = self.left_robot.get_current_gripper_states()
+                left_robot_is_default_cartesian_impedance = self.left_robot.is_using_default_cartesian_impedance()
             else:
                 left_robot_state = self._get_default_robot_state()
                 left_robot_gripper_state = self._get_default_gripper_state()
@@ -117,6 +144,7 @@ class BimanualFlexivServer():
             if self.enable_right_arm:
                 right_robot_state = self.right_robot.get_current_robot_states()
                 right_robot_gripper_state = self.right_robot.get_current_gripper_states()
+                right_robot_is_default_cartesian_impedance = self.right_robot.is_using_default_cartesian_impedance()
             else:
                 right_robot_state = self._get_default_robot_state()
                 right_robot_gripper_state = self._get_default_gripper_state()
@@ -195,6 +223,11 @@ class BimanualFlexivServer():
                 
             if robot_side == 'right' and not self.enable_right_arm:
                 raise HTTPException(status_code=400, detail="Right robot is not enabled.")
+
+            if request.type == "virtual" and self.left_robot_impedance_control_status == "user":
+                raise HTTPException(status_code=400, detail="Left robot's impedance is under user's control")
+            if request.type == "virtual" and self.right_robot_impedance_control_status == "user":
+                raise HTTPException(status_code=400, detail="Right robot's impedance is under user's control")
 
             robot = self.left_robot if robot_side == 'left' else self.right_robot
             robot.tcp_move(request.target_tcp)

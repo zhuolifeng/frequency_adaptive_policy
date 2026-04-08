@@ -48,12 +48,21 @@ class RealImageTactileDataset(BaseImageDataset):
                  ):
         assert os.path.isdir(dataset_path)
 
-        action_key = ["action"]
+        stacks_to_flatten = list()
+        
+        if "action_stack" in shape_meta:
+            action_key = ["action_stack", "action"]
+            stacks_to_flatten.append("action_stack")
+        else:
+            action_key = ["action"]
 
         rgb_keys = list()
         lowdim_keys = list()
         obs_shape_meta = shape_meta.get('obs', dict())
         for key, attr in obs_shape_meta.items():
+            flatten = attr.get('flatten', False)
+            if flatten:
+                stacks_to_flatten.append(key)
             type = attr.get('type', 'low_dim')
             if type == 'rgb':
                 rgb_keys.append(key)
@@ -64,6 +73,9 @@ class RealImageTactileDataset(BaseImageDataset):
         extended_lowdim_keys = list()
         extended_obs_shape_meta = shape_meta.get('extended_obs', dict())
         for key, attr in extended_obs_shape_meta.items():
+            flatten = attr.get('flatten', False)
+            if flatten:
+                stacks_to_flatten.append(key)
             type = attr.get('type', 'low_dim')
             if type == 'rgb':
                 extended_rgb_keys.append(key)
@@ -75,6 +87,8 @@ class RealImageTactileDataset(BaseImageDataset):
         zarr_load_keys = list(filter(lambda key: "wrt" not in key, zarr_load_keys))
         replay_buffer = ReplayBuffer.copy_from_path(
             self.zarr_path, keys=zarr_load_keys)
+        sensor_stacks = replay_buffer.flatten_stacks(stacks_to_flatten)
+        
 
         if delta_action:
             # replace action as relative to previous frame
@@ -126,10 +140,12 @@ class RealImageTactileDataset(BaseImageDataset):
             pad_before=pad_before, 
             pad_after=pad_after,
             episode_mask=train_mask,
-            key_first_k=key_first_k
+            key_first_k=key_first_k,
+            sensor_stacks=sensor_stacks
             )
         
         self.replay_buffer = replay_buffer
+        self.sensor_stacks = sensor_stacks
         self.sampler = sampler
         self.shape_meta = shape_meta
         self.rgb_keys = rgb_keys
@@ -159,7 +175,8 @@ class RealImageTactileDataset(BaseImageDataset):
             pad_before=self.pad_before,
             pad_after=self.pad_after,
             episode_mask=self.val_mask,
-            key_first_k=self.key_first_k
+            key_first_k=self.key_first_k,
+            sensor_stacks=self.sensor_stacks
             )
         val_set.val_mask = ~self.val_mask
         return val_set
@@ -182,12 +199,15 @@ class RealImageTactileDataset(BaseImageDataset):
         if self.relative_action or self.rpy_for_rotation:
             # action and obs
             recalculate_data_dict = {key: list() for key in (self.lowdim_keys + ['action']) if ('robot_tcp_pose' in key and 'wrt' not in key) or 'action' in key}
+            recalculate_data_dict = {key: list() for key in (self.lowdim_keys + ['action'] + ['action_stack']) if ('robot_tcp_pose' in key and 'wrt' not in key) or 'action' in key or 'action_stack' in key}
             # extended_obs
             recalculate_data_dict.update({f"extended_{key}": list() for key in self.extended_lowdim_keys if 'robot_tcp_pose' in key and 'wrt' not in key})
             for data in tqdm.tqdm(self, leave=False, desc='Calculating updated action/obs for normalizer'):
                 for key in recalculate_data_dict.keys():
                     if key == 'action':
                         recalculate_data_dict[key].append(data[key])
+                    elif key == 'action_stack':
+                       recalculate_data_dict[key].append(data[key])
                     elif 'extended_' in key:
                         recalculate_data_dict[key].append(data['extended_obs'][key.replace('extended_', '')])
                     else:
@@ -197,10 +217,12 @@ class RealImageTactileDataset(BaseImageDataset):
         # action
         if self.relative_action or self.rpy_for_rotation:
             action_all = recalculate_data_dict['action']
+            action_stack_all = recalculate_data_dict['action_stack']
         else:
             action_all = self.replay_buffer['action'][:, :self.shape_meta['action']['shape'][0]]
+            action_stack_all = self.replay_buffer['action_stack'][:, :self.shape_meta['action_stack']['shape'][0]]
         normalizer['action'] = get_action_normalizer(action_all)
-
+        normalizer['action_stack'] = get_action_normalizer(action_stack_all)
         # obs
         for key in self.lowdim_keys:
             if (self.relative_action or self.rpy_for_rotation) and key in recalculate_data_dict:
@@ -272,7 +294,10 @@ class RealImageTactileDataset(BaseImageDataset):
 
         obs_dict = dict()
         for key in self.rgb_keys:
-            T_slice = slice(self.n_obs_steps)
+            if key in self.sensor_stacks:
+                T_slice = slice(self.n_obs_steps * self.sensor_stacks[key])
+            else:
+                T_slice = slice(self.n_obs_steps)
             # move channel last to channel first
             # T,H,W,C
             # convert uint8 image to float32
@@ -284,7 +309,10 @@ class RealImageTactileDataset(BaseImageDataset):
                 del data[key]
         for key in self.lowdim_keys:
             if 'wrt' not in key:
-                T_slice = slice(self.n_obs_steps)
+                if key in self.sensor_stacks:
+                    T_slice = slice(self.n_obs_steps * self.sensor_stacks[key])
+                else:
+                    T_slice = slice(self.n_obs_steps)
                 if len(self.shape_meta['obs'][key]['shape']) == 1:
                     obs_dict[key] = data[key][:, :self.shape_meta['obs'][key]['shape'][0]][T_slice][::-obs_downsample_ratio][::-1].astype(np.float32)
                 elif len(self.shape_meta['obs'][key]['shape']) == 2:
@@ -322,10 +350,12 @@ class RealImageTactileDataset(BaseImageDataset):
                 del data[key]
 
         action = data['action'][:, :self.shape_meta['action']['shape'][0]].astype(np.float32)
+        action_stack = data['action_50hz'][:, :self.shape_meta['action_stack']['shape'][0]].astype(np.float32)
         # handle latency by dropping first n_latency_steps action
         # observations are already taken care of by T_slice
         if self.n_latency_steps > 0:
             action = action[self.n_latency_steps:]
+            action_stack = action_stack[self.n_latency_steps:]
         
         if self.relative_action:
             base_absolute_action = np.concatenate([
@@ -333,7 +363,7 @@ class RealImageTactileDataset(BaseImageDataset):
                 obs_dict['right_robot_tcp_pose'][self.n_obs_steps-1] if 'right_robot_tcp_pose' in obs_dict else np.array([])
             ], axis=-1)
             action = absolute_actions_to_relative_actions(action, base_absolute_action=base_absolute_action)
-
+            action_stack = absolute_actions_to_relative_actions(action_stack, base_absolute_action=base_absolute_action)
             for key in self.extended_lowdim_keys:
                 if 'robot_tcp_pose' in key and 'wrt' not in key:
                     extended_obs_dict[key] = absolute_actions_to_relative_actions(extended_obs_dict[key], base_absolute_action=base_absolute_action)
@@ -345,6 +375,7 @@ class RealImageTactileDataset(BaseImageDataset):
 
         if self.rpy_for_rotation:
             action = matrix_actions_to_rpy_actions(action)
+            action_stack = matrix_actions_to_rpy_actions(action_stack)
             for key in self.lowdim_keys:
                 if 'robot_tcp_pose' in key:
                     obs_dict[key] = matrix_actions_to_rpy_actions(obs_dict[key])
@@ -355,6 +386,7 @@ class RealImageTactileDataset(BaseImageDataset):
         torch_data = {
             'obs': dict_apply(obs_dict, torch.from_numpy),
             'action': torch.from_numpy(action),
+            'action_stack': torch.from_numpy(action_stack),
             'extended_obs': dict_apply(extended_obs_dict, torch.from_numpy),
         }
         return torch_data
