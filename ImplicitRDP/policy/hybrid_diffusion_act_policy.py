@@ -167,6 +167,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
             self.amp_dtype = None
         
         self.action_history = None
+        self.reactive_tcp_action_history = None
         
         # Two-stage training: first train ACT only, then add DP
         self.dp_warmup_epochs = dp_warmup_epochs
@@ -183,6 +184,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
     
     def reset(self):
         self.action_history = None
+        self.reactive_tcp_action_history = None
 
     def _select_inference_head_from_obs_tokens(
         self, obs_tokens: torch.Tensor
@@ -695,7 +697,6 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                                 inference_batch_size: Optional[int] = None,
                                 return_noisy_trajectory: bool = False
                                 ) -> List[Dict[str, torch.Tensor]]:
-        inference_head = getattr(self, 'inference_head', 'diffusion')
         obs_tokens_and_noisy_trajectory = torch.cat(obs_tokens_and_noisy_trajectory_list, dim=0)
         B = obs_tokens_and_noisy_trajectory.shape[0]
 
@@ -721,7 +722,8 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
 
         obs_tokens = obs_tokens_flat.to(self.device).reshape(B, -1, self.n_emb)
 
-        inference_head = self._select_inference_head_from_obs_tokens(obs_tokens)
+        tcp_obs_tokens = obs_tokens[:1]
+        inference_head = self._select_inference_head_from_obs_tokens(tcp_obs_tokens)
 
         if inference_head == 'diffusion':
             temporal_cond = self._prepare_reactive_temporal_cond(
@@ -875,13 +877,20 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         for i in range(B):
             obs_tokens_single = obs_tokens[i:i + 1]
             temporal_cond_single = temporal_cond[i:i + 1] if temporal_cond is not None else None
+            action_history = self.reactive_tcp_action_history if i == 0 else None
             action_dict = self._predict_action_act_from_tokens(
                 obs_tokens=obs_tokens_single,
                 temporal_cond=temporal_cond_single,
-                action_history=None,
-                update_history=False
+                action_history=action_history,
+                update_history=False,
+                return_normalized_action_chunk=True
             )
             action_chunk_full = action_dict['action']
+            action_chunk_normalized = action_dict['action_chunk_normalized']
+            if i == 0:
+                self.reactive_tcp_action_history = self._append_reactive_tcp_action_history(
+                    action_chunk_normalized
+                )
             act_end = min(action_chunk_full.shape[1], 80)
             act_start = min(13, act_end)
             action_chunk = action_chunk_full[:, act_start:act_end, :]
@@ -1037,7 +1046,8 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                                         obs_tokens: torch.Tensor,
                                         temporal_cond: Optional[torch.Tensor],
                                         action_history: Optional[torch.Tensor] = None,
-                                        update_history: bool = True
+                                        update_history: bool = True,
+                                        return_normalized_action_chunk: bool = False
                                         ) -> Dict[str, torch.Tensor]:
         if action_history is None:
             action_history = self.action_history
@@ -1052,7 +1062,10 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         action_chunk = self.normalizer['action_stack'].unnormalize(action_chunk_normalized)
         if update_history:
             self._update_action_history(action_chunk_normalized)
-        return {'action': action_chunk}
+        result = {'action': action_chunk}
+        if return_normalized_action_chunk:
+            result['action_chunk_normalized'] = action_chunk_normalized
+        return result
 
     def _update_action_history(self, action_chunk_normalized: torch.Tensor):
         if action_chunk_normalized is None:
@@ -1070,6 +1083,23 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         max_total = max_history + self.act_model.action_chunk_size
         if self.action_history.shape[1] > max_total:
             self.action_history = self.action_history[:, -max_total:, :]
+
+    def _append_reactive_tcp_action_history(self, action_chunk_normalized: torch.Tensor):
+        if action_chunk_normalized is None:
+            return self.reactive_tcp_action_history
+
+        if self.reactive_tcp_action_history is None:
+            return action_chunk_normalized
+
+        max_history = self.act_model.max_action_history
+        action_history = torch.cat([
+            self.reactive_tcp_action_history[:, -max_history:, :],
+            action_chunk_normalized
+        ], dim=1)
+        max_total = max_history + self.act_model.action_chunk_size
+        if action_history.shape[1] > max_total:
+            action_history = action_history[:, -max_total:, :]
+        return action_history
 
     
     def update_progress(self, progress):
@@ -1376,4 +1406,3 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
             optim_groups, lr=lr, betas=betas
         )
         return optimizer
-
