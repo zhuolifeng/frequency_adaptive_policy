@@ -33,7 +33,7 @@ echo "Stage 0: post-processing data..."
 echo "Stage 1: training Policy..."
 POLICY_TASK_NAME=${TASK}_${STAGE1_DATASET_VERSION}_policy_bigger_acp
 CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
-    --config-name=train_hybrid_diffusion_act_stagewise_workspace \
+    --config-name=train_hybrid_diffusion_act_confidence_stagewise_workspace \
     task=${TASK_CONFIG} \
     task.dataset_path=${STAGE1_DATASET_PATH} \
     task.name=${POLICY_TASK_NAME} \

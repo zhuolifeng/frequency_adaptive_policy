@@ -7,8 +7,8 @@ from omegaconf import OmegaConf
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
-from ImplicitRDP.policy.hybrid_diffusion_act_policy import HybridDiffusionACTPolicy
-from ImplicitRDP.policy.hybrid_diffusion_act_stagewise_policy import HybridDiffusionACTStagewisePolicy
+from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
+from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
 
 import os
 from loguru import logger
@@ -82,7 +82,7 @@ def main(cfg):
 
         # set inference params
         policy.num_inference_steps = 5  # DDIM inference iterations
-    elif isinstance(policy, HybridDiffusionACTPolicy):
+    elif isinstance(policy, HybridDiffusionACTConfidencePolicy):
             # Hybrid Diffusion + ACT model
             policy = workspace.model
             if cfg.training.use_ema:
@@ -99,7 +99,7 @@ def main(cfg):
             if inference_head not in ['diffusion', 'act']:
                 raise ValueError(f"inference_head must be 'diffusion' or 'act', got '{inference_head}'")
             policy.inference_head = inference_head
-    elif isinstance(policy, HybridDiffusionACTStagewisePolicy):
+    elif isinstance(policy, HybridDiffusionACTConfidenceStagewisePolicy):
             # Hybrid Diffusion + ACT model
             policy = workspace.model
             if cfg.training.use_ema:

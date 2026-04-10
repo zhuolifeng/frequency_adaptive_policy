@@ -2,15 +2,17 @@
 
 #--------------------------------
 # Config
-GPU_ID=0
+GPU_ID=0,1,2,3,4,5,6,7
 
-TASK="flip"
-DATASET_VERSION="v2"
+TASK="dual_switch"
+DATASET_VERSION="v4"
+ROUND=1
 # ACTION_TYPE="right_arm_6DOF" # No Auxiliary Task
 # ACTION_TYPE="right_arm_6DOF_wrench" # FP
 ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness" # VRR
-DATASET_PATH="/home/wendi/Desktop/ImplicitRDP/data/${TASK}_${DATASET_VERSION}_zarr"
-TASK_CONFIG="real_${TASK}_image_wrench_implicitrdp_10fps"
+DATASET_TAG="${TASK}_${DATASET_VERSION}_round_${ROUND}"
+DATASET_PATH="/mnt/data/users/lifeng/${DATASET_TAG}_zarr"
+TASK_CONFIG="real_${TASK}_image_wrench_offline_rl_10fps_acp"
 
 USE_AMP_FOR_POLICY=False
 AMP_DTYPE_FOR_POLICY="bf16"
@@ -21,11 +23,11 @@ LOGGING_MODE="online"
 
 # Stage 0: Post-process data
 echo "Stage 0: post-processing data..."
-python post_process_data.py --tag ${TASK}_${DATASET_VERSION} --action_type ${ACTION_TYPE} --skip_static_frames
+#python post_process_data.py --tag ${DATASET_TAG} --action_type ${ACTION_TYPE} --skip_static_frames
 
 # Stage 1: Train Policy
 echo "Stage 1: training Policy..."
-POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_policy_bigger_acp
+POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_policy_bigger_acp_round_${ROUND}
 CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
     --config-name=train_reactive_diffusion_transformer_real_image_workspace \
     task=${TASK_CONFIG} \

@@ -22,7 +22,7 @@ from ImplicitRDP.model.force.rnn import RNN
 from loguru import logger
 
 
-class HybridDiffusionACTPolicy(BaseImagePolicy):
+class HybridDiffusionACTConfidencePolicy(BaseImagePolicy):
     def __init__(self, 
             shape_meta: dict,
             noise_scheduler: DDPMScheduler,
@@ -173,7 +173,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
         self.dp_warmup_epochs = dp_warmup_epochs
         self.current_epoch = 0  # Will be updated via update_progress or set_epoch
         
-        logger.info(f"HybridDiffusionACTPolicy initialized (two independent heads; no confidence or fusion)")
+        logger.info(f"HybridDiffusionACTConfidencePolicy initialized (two independent heads; no confidence or fusion)")
         if dp_warmup_epochs > 0:
             logger.info(f"Two-stage training: ACT only for {dp_warmup_epochs} epochs, then DP training starts")
         else:

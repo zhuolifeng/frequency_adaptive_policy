@@ -6,12 +6,12 @@ from torch.cuda.amp import autocast
 from einops import reduce
 
 from ImplicitRDP.model.common.normalizer import LinearNormalizer
-from ImplicitRDP.policy.hybrid_diffusion_act_policy import HybridDiffusionACTPolicy
+from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.model.confidence.transformer import TransformerConfidenceHead
 from loguru import logger
 
 
-class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
+class HybridDiffusionACTConfidenceStagewisePolicy(HybridDiffusionACTConfidencePolicy):
     def __init__(self,
                  shape_meta: dict,
                  noise_scheduler,
@@ -98,7 +98,7 @@ class HybridDiffusionACTStagewisePolicy(HybridDiffusionACTPolicy):
         self.freeze_act_model = freeze_act_model
         self.freeze_confidence_head = freeze_confidence_head
         
-        logger.info(f"HybridDiffusionACTStagewisePolicy initialized (three-stage training)")
+        logger.info(f"HybridDiffusionACTConfidenceStagewisePolicy initialized (three-stage training)")
         logger.info(f"  Stage 1: Train ACT + encoder + rnn, freeze DP + Confidence")
         logger.info(f"  Stage 2: Train ACT + DP + encoder + rnn, freeze Confidence")
         logger.info(f"  Stage 3: Train Confidence only, freeze all others")

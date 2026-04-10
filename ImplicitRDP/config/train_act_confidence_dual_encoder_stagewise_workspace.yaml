@@ -171,7 +171,7 @@ training:
   amp_dtype: "bf16"
   lr_scheduler: cosine
   lr_warmup_steps: 2000
-  num_epochs: stage1_epochs + stage2_epochs
+  num_epochs: eval:'${stage1_epochs}+${stage2_epochs}'
   gradient_accumulate_every: 1
   use_ema: True
   freeze_encoder: False

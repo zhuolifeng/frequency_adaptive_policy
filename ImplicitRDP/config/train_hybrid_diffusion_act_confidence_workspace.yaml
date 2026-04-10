@@ -2,8 +2,8 @@ defaults:
   - task: real_dual_switch_image_wrench_offline_rl_10fps_acp
   - _self_
 
-name: train_dual_switch_hybrid_diffusion_act_workspace
-_target_: ImplicitRDP.workspace.train_hybrid_diffusion_act_workspace.TrainHybridDiffusionACTWorkspace
+name: train_dual_switch_hybrid_diffusion_act_confidence_workspace
+_target_: ImplicitRDP.workspace.train_hybrid_diffusion_act_confidence_workspace.TrainHybridDiffusionACTConfidenceWorkspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
@@ -20,7 +20,7 @@ n_emb: 768
 ckpt_path: null
 
 policy:
-  _target_: ImplicitRDP.policy.hybrid_diffusion_act_policy.HybridDiffusionACTPolicy
+  _target_: ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy.HybridDiffusionACTConfidencePolicy
   inference_head: act # 当 use_confidence_head=False 时，评估脚本按此固定 head
 
   shape_meta: ${task.model_shape_meta}

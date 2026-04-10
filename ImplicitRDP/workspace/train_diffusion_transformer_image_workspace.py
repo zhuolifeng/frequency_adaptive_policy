@@ -272,6 +272,7 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
+                        unwrapped_model = accelerator.unwrap_model(self.model)
                         # device transfer
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         if train_sampling_batch is None:
@@ -282,7 +283,7 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
 
                         # compute loss
                         with autocast(enabled=use_amp, dtype=amp_dtype):
-                            raw_loss = self.model.compute_diffusion_loss(batch)
+                            raw_loss = unwrapped_model.compute_diffusion_loss(batch)
                             loss = raw_loss / cfg.training.gradient_accumulate_every
                             
                         # Scale loss and backward pass

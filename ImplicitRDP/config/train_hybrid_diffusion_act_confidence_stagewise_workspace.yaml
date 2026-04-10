@@ -2,8 +2,8 @@ defaults:
   - task: real_dual_switch_image_wrench_offline_rl_10fps_acp
   - _self_
 
-name: train_hybrid_diffusion_act_stagewise_workspace
-_target_: ImplicitRDP.workspace.train_hybrid_diffusion_act_stagewise_workspace.TrainHybridDiffusionACTStagewiseWorkspace
+name: train_hybrid_diffusion_act_confidence_stagewise_workspace
+_target_: ImplicitRDP.workspace.train_hybrid_diffusion_act_confidence_stagewise_workspace.TrainHybridDiffusionACTConfidenceStagewiseWorkspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
@@ -20,7 +20,7 @@ n_emb: 768
 ckpt_path: null
 
 policy:
-  _target_: ImplicitRDP.policy.hybrid_diffusion_act_stagewise_policy.HybridDiffusionACTStagewisePolicy
+  _target_: ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy.HybridDiffusionACTConfidenceStagewisePolicy
   inference_head: act # 当 use_confidence_head=False 时，评估脚本按此固定 head
 
   shape_meta: ${task.model_shape_meta}
@@ -191,7 +191,7 @@ training:
   stage2_epochs: 600
   stage3_epochs: 250
   stage3_dataset_path: null
-  num_epochs: stage1_epochs + stage2_epochs + stage3_epochs
+  num_epochs: eval:'${stage1_epochs}+${stage2_epochs}+${stage3_epochs}'
   gradient_accumulate_every: 1
   # EMA destroys performance when used with BatchNorm
   # replace BatchNorm with GroupNorm.

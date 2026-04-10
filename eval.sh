@@ -37,7 +37,7 @@
 
 # ImplicitRDP w. Force (Box Flipping) v2
 python eval_real_robot_flexiv.py \
-   --config-name train_hybrid_diffusion_act_stagewise_workspace \
+   --config-name train_hybrid_diffusion_act_confidence_stagewise_workspace \
    policy.noise_scheduler.prediction_type=v_prediction \
    task=real_dual_switch_image_wrench_offline_rl_10fps_acp  \
    task.env_runner.action_type=right_arm_6DOF \

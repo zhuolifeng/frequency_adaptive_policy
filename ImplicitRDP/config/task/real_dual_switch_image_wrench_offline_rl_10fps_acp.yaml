@@ -67,28 +67,6 @@ model_shape_meta:
   action_stack:
     shape: [13] # (3+3 + 3+3 + 1)
 
-rl_shape_meta:
-  # acceptable types: rgb, low_dim
-  obs:
-    external_img:
-      shape: ${task.image_shape}
-      type: rgb
-    right_wrist_img:
-      shape: ${task.image_shape}
-      type: rgb
-    # do not use relative tcp pose to meet markovian assumption
-    # right_robot_tcp_pose:
-    #   shape: [9]
-    #   type: low_dim
-    right_robot_tcp_wrench:
-      shape: [6]
-      type: low_dim
-  extended_obs: # for the AT RNN decoder of the latent diffusion policy
-    right_robot_tcp_wrench:
-      shape: [6]
-      type: low_dim
-  action:
-    shape: [19] # (3+6 + 3+6 + 1)
 
 env_runner:
   _target_: ImplicitRDP.env_runner.real_stable_reactive_runner.RealStableReactiveRunner
