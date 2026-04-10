@@ -170,6 +170,47 @@ def create_force_plot(force_arr: np.ndarray, metric: str = "norm", title: str | 
     plt.tight_layout()
     return fig
 
+def create_action_chunk_plot(
+    gt_action: np.ndarray,
+    pred_action: np.ndarray,
+    title: str,
+    max_dims: int = 6,
+):
+    if gt_action.ndim != 2 or pred_action.ndim != 2:
+        raise ValueError(
+            f"Expected 2D action chunks, got gt={gt_action.shape}, pred={pred_action.shape}"
+        )
+
+    chunk_len = min(gt_action.shape[0], pred_action.shape[0])
+    action_dim = min(gt_action.shape[1], pred_action.shape[1], max_dims)
+
+    gt_action = gt_action[:chunk_len, :action_dim]
+    pred_action = pred_action[:chunk_len, :action_dim]
+    x = np.arange(chunk_len)
+
+    n_rows = 2
+    n_cols = 3
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 8), squeeze=False)
+    axes_flat = axes.flatten()
+
+    for dim_idx in range(action_dim):
+        ax = axes_flat[dim_idx]
+        ax.plot(x, gt_action[:, dim_idx], color="black", linestyle="--", linewidth=1.5, marker="o", markersize=3, label="GT")
+        ax.plot(x, pred_action[:, dim_idx], color="tab:orange", linewidth=1.5, marker=".", markersize=4, label="Pred")
+        ax.set_title(f"Action Dim {dim_idx}")
+        ax.set_xlabel("Chunk Step")
+        ax.set_ylabel("Value")
+        ax.grid(True, alpha=0.3)
+
+    for ax in axes_flat[action_dim:]:
+        ax.axis("off")
+
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=2, bbox_to_anchor=(0.5, 0.995), frameon=True)
+    fig.suptitle(title)
+    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    return fig
+
 def process_single_episode(policy, episode_data_list, episode_force_data, has_confidence, device, output_dir, episode_idx, video_fps=10):
     logger.info(f"Processing Episode {episode_idx} ({len(episode_data_list)} frames)")
 
@@ -182,6 +223,8 @@ def process_single_episode(policy, episode_data_list, episode_force_data, has_co
     xyz_error_data = []
     rpy_error_data = []
     log_sigma_data = [] if has_confidence else None
+    gt_action_chunk_data = []
+    pred_action_chunk_data = []
 
     # Force data for force curve - use the extracted zarr data (same as force.py)
     force_data = episode_force_data if episode_force_data is not None else []
@@ -192,7 +235,7 @@ def process_single_episode(policy, episode_data_list, episode_force_data, has_co
         for frame_idx, sample in enumerate(tqdm.tqdm(episode_data_list, desc=f"Episode {episode_idx}")):
             # Get observation data
             obs_dict = {k: v for k, v in sample['obs'].items() if isinstance(v, torch.Tensor)}
-            gt_action = sample['action']
+            gt_action = sample['action'][:,1:16]
             extended_obs_dict = None
             if 'extended_obs' in sample and sample['extended_obs'] is not None:
                 extended_obs_dict = {k: v for k, v in sample['extended_obs'].items() if isinstance(v, torch.Tensor)}
@@ -203,11 +246,14 @@ def process_single_episode(policy, episode_data_list, episode_force_data, has_co
 
             # Compute errors
             mse, error_xyz, error_rpy = compute_errors(gt_action, pred_action, policy)
+            aligned_gt_action, aligned_pred_action = align_gt_pred(gt_action, pred_action, policy)
 
             # Store data - take average MSE over the entire chunk
             mse_data.append(float(mse[0].mean()))
             xyz_error_data.append(error_xyz[0].tolist())
             rpy_error_data.append(error_rpy[0].tolist())
+            gt_action_chunk_data.append(aligned_gt_action[0].detach().cpu().numpy())
+            pred_action_chunk_data.append(aligned_pred_action[0].detach().cpu().numpy())
 
             # Compute confidence if available
             if has_confidence:
@@ -251,6 +297,14 @@ def process_single_episode(policy, episode_data_list, episode_force_data, has_co
         # RPY error plot
         fig_rpy = create_error_plot(rpy_error_data[:frame_idx+1], 'RPY Rotation Error', len(episode_data_list))
         plots['rpy_error'] = fig_to_image(fig_rpy)
+
+        # Current frame action chunk plot
+        fig_action_chunk = create_action_chunk_plot(
+            gt_action_chunk_data[frame_idx],
+            pred_action_chunk_data[frame_idx],
+            title=f'Action Chunk GT vs Pred (Frame {frame_idx+1})',
+        )
+        plots['action_chunk'] = fig_to_image(fig_action_chunk)
 
         # Get observation image
         sample = episode_data_list[frame_idx]
@@ -501,4 +555,3 @@ def main(cfg):
 
 if __name__ == "__main__":
     main()
-

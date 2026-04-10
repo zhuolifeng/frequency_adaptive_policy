@@ -21,7 +21,7 @@ CONFIG_NAME="train_hybrid_diffusion_act_stagewise_workspace"
 # ============================================================
 #/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.03.19/17.35-15_dual_switch_v3_to_v3_4_act_confidence_stagewise_policy_round_1_stage2/checkpoints 
 #/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.03.19/17.27-14_dual_switch_v3_to_v3_4_act_confidence_stagewise_policy_round_1_stage2/checkpoints
-CKPT_PATH="/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.03.27/15.34-16_dual_switch_v4_hybrid_stagewise_round_1_stage3/checkpoints/latest.ckpt"
+CKPT_PATH="/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.04.03/00.22-12_train_hybrid_diffusion_act_stagewise_workspace_dual_switch_v4_policy_bigger_acp/checkpoints/latest.ckpt"
 
 # Dataset path
 DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr"
@@ -34,7 +34,7 @@ VIDEO_FPS=1
 NUM_INFERENCE_STEPS=8
 
 # Output directory for videos
-OUTPUT_DIR="evaluations_stagewise_800_250_collabation_hybrid_range_new"
+OUTPUT_DIR="evaluations_stagewise_collabation_hybrid_range_new_act"
 
 # ============================================================
 # 根据 CONFIG_NAME 自动推导 transforms override，关闭随机数据增强
@@ -80,6 +80,7 @@ python eval_confidence.py \
     +num_inference_steps=${NUM_INFERENCE_STEPS} \
     +video_fps=${VIDEO_FPS} \
     +device=${GPU_DEVICE} \
+    policy.noise_scheduler.prediction_type=v_prediction \
     task.dataset.val_ratio=0.0 \
     "${TRANSFORMS_OVERRIDE[@]}"
 
