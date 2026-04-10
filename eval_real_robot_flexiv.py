@@ -11,6 +11,7 @@ from ImplicitRDP.policy.hybrid_diffusion_act_policy import HybridDiffusionACTPol
 from ImplicitRDP.policy.hybrid_diffusion_act_stagewise_policy import HybridDiffusionACTStagewisePolicy
 
 import os
+from loguru import logger
 import psutil
 
 # add this to prevent assigning too may threads when using numpy
@@ -45,7 +46,9 @@ def main(cfg):
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg)
     workspace: BaseWorkspace
-    
+    policy = workspace.model
+    if cfg.training.use_ema:
+        policy = workspace.ema_model
     # load checkpoint
     ckpt_path = cfg.ckpt_path
     payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
@@ -79,14 +82,34 @@ def main(cfg):
 
         # set inference params
         policy.num_inference_steps = 5  # DDIM inference iterations
-    elif 'hybrid' in cfg.name:
-        policy = workspace.model
-        if cfg.training.use_ema:
-            policy = workspace.ema_model
+    elif isinstance(policy, HybridDiffusionACTPolicy):
+            # Hybrid Diffusion + ACT model
+            policy = workspace.model
+            if cfg.training.use_ema:
+                policy = workspace.ema_model
+            device = torch.device('cuda')
+            policy.eval().to(device)
 
-        device = torch.device('cuda')
-        policy.eval().to(device)
-        policy.num_inference_steps = 5
+            # set inference params
+            policy.num_inference_steps = 5  # DDIM inference iterations (same as transformer)
+            
+            # set inference head (default to 'diffusion' if not specified)
+            inference_head = cfg.policy.get('inference_head', 'diffusion')
+            logger.info("inference head:", inference_head)
+            if inference_head not in ['diffusion', 'act']:
+                raise ValueError(f"inference_head must be 'diffusion' or 'act', got '{inference_head}'")
+            policy.inference_head = inference_head
+    elif isinstance(policy, HybridDiffusionACTStagewisePolicy):
+            # Hybrid Diffusion + ACT model
+            policy = workspace.model
+            if cfg.training.use_ema:
+                policy = workspace.ema_model            
+            device = torch.device('cuda')
+            policy.eval().to(device)
+
+            # set inference params
+            policy.num_inference_steps = 5  # DDIM inference iterations (same as transformer)
+            
     else:
         raise NotImplementedError
 

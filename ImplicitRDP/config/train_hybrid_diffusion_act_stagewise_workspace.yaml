@@ -128,8 +128,8 @@ policy:
   confidence_log_sigma_max: 100.0
   confidence_clamp_log_sigma: False # Whether to clamp log_sigma output (True: clamp, False: no clamp like VGGT)
   use_confidence_head: True
-  use_confidence_based_head_selection: False
-  confidence_threshold_for_head_selection: 7.5
+  use_confidence_based_head_selection: True
+  confidence_threshold_for_head_selection: 3.5
   confidence_head_type: transformer # choices: transformer
   confidence_obs_encoder_n_layers: 2
   confidence_obs_encoder_hidden_dim: null

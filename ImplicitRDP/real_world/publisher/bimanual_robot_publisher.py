@@ -389,48 +389,6 @@ class BimanualRobotPublisher(Node):
         right_tcp_wrench_msg.wrench.torque.z = robot_states.rightRobotTCPWrench[5]
         self.right_tcp_wrench_publisher.publish(right_tcp_wrench_msg)
         
-        # Create and publish cartesian impedance state messages
-        left_cartesian_impedance_msg = JointState()
-        left_cartesian_impedance_msg.header = Header()
-        left_cartesian_impedance_msg.header.stamp = timestamp
-        left_cartesian_impedance_msg.name = ['left_is_default_cartesian_impedance']
-        left_cartesian_impedance_msg.position = [1.0 if robot_states.leftRobotIsDefaultCartesianImpedance else 0.0]
-        self.left_cartesian_impedance_publisher.publish(left_cartesian_impedance_msg)
-
-        right_cartesian_impedance_msg = JointState()
-        right_cartesian_impedance_msg.header = Header()
-        right_cartesian_impedance_msg.header.stamp = timestamp
-        right_cartesian_impedance_msg.name = ['right_is_default_cartesian_impedance']
-        right_cartesian_impedance_msg.position = [1.0 if robot_states.rightRobotIsDefaultCartesianImpedance else 0.0]
-        self.right_cartesian_impedance_publisher.publish(right_cartesian_impedance_msg)
-
-        # Create and publish desired TCP pose messages for left arm
-        desired_tcp_pose_left_msg = PoseStamped()
-        desired_tcp_pose_left_msg.header = Header()
-        desired_tcp_pose_left_msg.header.stamp = timestamp
-        desired_tcp_pose_left_msg.header.frame_id = 'desired_tcp_left'
-        tcp_pose_left_msg.pose.position = Point(x=robot_states.leftRobotDesiredTCP[0],
-                                                y=robot_states.leftRobotDesiredTCP[1],
-                                                z=robot_states.leftRobotDesiredTCP[2])
-        tcp_pose_left_msg.pose.orientation.w = robot_states.leftRobotDesiredTCP[3]
-        tcp_pose_left_msg.pose.orientation.x = robot_states.leftRobotDesiredTCP[4]
-        tcp_pose_left_msg.pose.orientation.y = robot_states.leftRobotDesiredTCP[5]
-        tcp_pose_left_msg.pose.orientation.z = robot_states.leftRobotDesiredTCP[6]
-        self.desired_tcp_pose_left_publisher.publish(desired_tcp_pose_left_msg)
-
-        # Create and publish desired TCP pose messages for right arm
-        desired_tcp_pose_right_msg = PoseStamped()
-        desired_tcp_pose_right_msg.header = Header()
-        desired_tcp_pose_right_msg.header.stamp = timestamp
-        desired_tcp_pose_right_msg.header.frame_id = 'desired_tcp_right'
-        desired_tcp_pose_right_msg.pose.position = Point(x=robot_states.rightRobotDesiredTCP[0],
-                                                y=robot_states.rightRobotDesiredTCP[1],
-                                                z=robot_states.rightRobotDesiredTCP[2])
-        desired_tcp_pose_right_msg.pose.orientation.w = robot_states.rightRobotDesiredTCP[3]
-        desired_tcp_pose_right_msg.pose.orientation.x = robot_states.rightRobotDesiredTCP[4]
-        desired_tcp_pose_right_msg.pose.orientation.y = robot_states.rightRobotDesiredTCP[5]
-        desired_tcp_pose_right_msg.pose.orientation.z = robot_states.rightRobotDesiredTCP[6]
-        self.desired_tcp_pose_right_publisher.publish(desired_tcp_pose_right_msg)
 
         # Update and publish sensor stacks if configured
         if self.sensor_stacks:

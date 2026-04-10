@@ -33,10 +33,6 @@ def get_topic_and_type(device_to_topic: DeviceToTopic):
         ('/right_tcp_vel', TwistStamped),
         ('/left_tcp_wrench', WrenchStamped),
         ('/right_tcp_wrench', WrenchStamped),
-        ('/left_is_default_cartesian_impedance', JointState),
-        ('/right_is_default_cartesian_impedance', JointState),
-        ('/left_desired_tcp_pose', PoseStamped),
-        ('/right_desired_tcp_pose', PoseStamped),
     ])
 
     return subs_name_type

@@ -78,7 +78,7 @@ class BimanualFlexivServer():
                 pass
             else:
                 self.right_robot.robot.SwitchMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
-                self.right_robot.gripper.Move(0, 0.10, 50)
+            self.right_robot.gripper.Move(0.05, 0.10, 50)
 
         if use_planner and self.enable_left_arm and self.enable_right_arm:
             # TODO: support bimanual planner
@@ -223,11 +223,6 @@ class BimanualFlexivServer():
                 
             if robot_side == 'right' and not self.enable_right_arm:
                 raise HTTPException(status_code=400, detail="Right robot is not enabled.")
-
-            if request.type == "virtual" and self.left_robot_impedance_control_status == "user":
-                raise HTTPException(status_code=400, detail="Left robot's impedance is under user's control")
-            if request.type == "virtual" and self.right_robot_impedance_control_status == "user":
-                raise HTTPException(status_code=400, detail="Right robot's impedance is under user's control")
 
             robot = self.left_robot if robot_side == 'left' else self.right_robot
             robot.tcp_move(request.target_tcp)

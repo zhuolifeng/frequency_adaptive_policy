@@ -2,7 +2,7 @@ import flexivrdk
 
 import threading
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 from loguru import logger
 
 
@@ -79,6 +79,7 @@ class FlexivController():
             logger.info("Robot is now operational")
             # important:reset the FTSensor in order to set the mode to NRT_CARTESIAN_MOTION_FORCE for RIZON 4s
             if self.enable_tdk and self.teleop is not None:
+                #pass
                 self._start_tdk()
             else:
                 # Reset the FT sensor before entering cartesian control.
@@ -322,6 +323,7 @@ class FlexivController():
         self.robot.SendCartesianMotionForce(
                 target_tcp, 
                 [0.0]*6, 
+                [0.0]*6,
                 0.5,
                 1.0)
 

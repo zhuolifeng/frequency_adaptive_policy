@@ -134,7 +134,7 @@ class RealStableReactiveRunner:
         rclpy.init(args=None)
         self.env = RealRobotEnvironment(transforms=self.transforms, **env_params)
         # set gripper to max width
-        self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width, self.action_type)
+        #self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width, self.action_type)
         time.sleep(2)
 
         self.max_duration_time = max_duration_time
@@ -567,8 +567,8 @@ class RealStableReactiveRunner:
                 # start rollout
                 self.env.reset()
                 # set gripper to max width
-                self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width,
-                                                     self.action_type)
+                #self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width,
+#                                                     self.action_type)
                 time.sleep(1)
 
                 policy.reset()

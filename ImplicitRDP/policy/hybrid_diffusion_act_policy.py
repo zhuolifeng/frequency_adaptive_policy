@@ -216,6 +216,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
                 f"confidence={confidence_value:.4f}, "
                 f"threshold={self.confidence_threshold_for_head_selection:.4f}"
             )
+        print(f"we get confidence value {confidence_value:.4f} from confidence head for head selection")
         return 'act' if confidence_value > self.confidence_threshold_for_head_selection else 'diffusion'
 
     def _prepare_reactive_temporal_cond(
@@ -648,16 +649,12 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
 
                 t = timesteps[step_idx]
 
-                if self.rnn_obs_encoder_dp is not None and temporal_cond_batch is not None:
-                    temporal_cond_tokens_batch = self.rnn_obs_encoder_dp(temporal_cond_batch)
-                else:
-                    temporal_cond_tokens_batch = None
 
                 model_output = model(
                     trajectory_batch,
                     t,
                     cond=cond_batch,
-                    temporal_cond=temporal_cond_tokens_batch if temporal_cond_tokens_batch is not None else temporal_cond_batch,
+                    temporal_cond=temporal_cond_batch,
                 )
 
                 trajectory_batch = scheduler.step(
@@ -724,7 +721,7 @@ class HybridDiffusionACTPolicy(BaseImagePolicy):
 
         tcp_obs_tokens = obs_tokens[:1]
         inference_head = self._select_inference_head_from_obs_tokens(tcp_obs_tokens)
-
+        print(f"we use head {inference_head} for inference based on tcp_obs_tokens")
         if inference_head == 'diffusion':
             temporal_cond = self._prepare_reactive_temporal_cond(
                 extended_obs_dict=extended_obs_dict,
