@@ -39,7 +39,7 @@
 python eval_real_robot_flexiv.py \
    --config-name train_hybrid_diffusion_act_confidence_stagewise_workspace \
    policy.noise_scheduler.prediction_type=v_prediction \
-   task=real_dual_switch_image_wrench_offline_rl_10fps_acp  \
+   task=real_dual_switch_image_wrench_offline_10fps_acp  \
    task.env_runner.action_type=right_arm_6DOF \
    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
    ckpt_path=/home/lifeng/Desktop/frequency_adaptive_policy/data/outputs/2026.04.03/00.22-12_train_hybrid_diffusion_act_stagewise_workspace_dual_switch_v4_policy_bigger_acp/checkpoints/latest.ckpt

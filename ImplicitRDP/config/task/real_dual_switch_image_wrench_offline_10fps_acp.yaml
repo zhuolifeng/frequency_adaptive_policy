@@ -2,7 +2,7 @@ defaults:
   - real_dual_switch_iphone_usb_camera_30_10fps@_here_
   - _self_
 
-name: real_dual_switch_image_wrench_offline_rl_10fps_acp
+name: real_dual_switch_image_wrench_offline_10fps_acp
 
 kineteach_controller:
   stiffness_ratio: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]

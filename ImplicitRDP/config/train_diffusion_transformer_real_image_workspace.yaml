@@ -1,5 +1,5 @@
 defaults:
-  - task: real_dual_switch_image_wrench_offline_rl_10fps_acp
+  - task: real_dual_switch_image_wrench_offline_10fps_acp
   - _self_
 
 name: train_diffusion_transformer_image

@@ -73,7 +73,7 @@ export CKPT_PATH="${CKPT_PATH}"
 export OUTPUT_DIR="${OUTPUT_DIR}"
 python eval_confidence.py \
     --config-name ${CONFIG_NAME} \
-    task=real_${TASK}_image_wrench_offline_rl_10fps_acp \
+    task=real_${TASK}_image_wrench_offline_10fps_acp \
     task.dataset_path=${DATASET_PATH} \
     +eval_batch_size=64 \
     +use_full_dataset=True \

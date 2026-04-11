@@ -8,7 +8,7 @@ TASK="dual_switch"
 STAGE1_DATASET_VERSION="v4"
 STAGE2_DATASET_VERSION="v4.1"
 ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness"
-TASK_CONFIG="real_${TASK}_image_wrench_offline_rl_10fps_acp"
+TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 
 # Three-stage training epochs
 STAGE1_EPOCHS=300

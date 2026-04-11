@@ -12,7 +12,7 @@ ROUND=1
 ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness" # VRR
 DATASET_TAG="${TASK}_${DATASET_VERSION}_round_${ROUND}"
 DATASET_PATH="/mnt/data/users/lifeng/${DATASET_TAG}_zarr"
-TASK_CONFIG="real_${TASK}_image_wrench_offline_rl_10fps_acp"
+TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 
 USE_AMP_FOR_POLICY=False
 AMP_DTYPE_FOR_POLICY="bf16"
