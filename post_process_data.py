@@ -2,8 +2,10 @@ import pickle
 import os
 from loguru import logger
 import zarr
+import cv2
 import numpy as np
 import os.path as osp
+import py_cli_interaction
 import matplotlib.pyplot as plt
 from hydra import initialize, compose
 from omegaconf import DictConfig
@@ -59,13 +61,17 @@ def get_global_offset(local_offset, tcp_pose):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--tag', type=str, default='flip_v1')
+    parser.add_argument('--tag', type=str, default='flip_v5_round_1')
     parser.add_argument('--action_type', type=str, default='right_arm_3D_translation')
     parser.add_argument('-ss', '--skip_static_frames', action='store_true', default=False)
     parser.add_argument('-tdr', '--temporal_downsample_ratio', type=int, default=1)
+    parser.add_argument('-stdr', '--stack_temporal_downsample_ratio', type=int, default=1)
+    parser.add_argument('--done_last_k', type=int, default=5)
     parser.add_argument('--sensor_mode', type=str, default='dual_arm_two_realsense_four_tactile')
     parser.add_argument('--debug', action='store_true', default=False)
     parser.add_argument('-di', '--debug_start_seq_idx', type=int, default=0)
+    parser.add_argument('-r', '--resume', action='store_true', default=False,
+                        help='Skip if data already exists, do not overwrite')
     args = parser.parse_args()
 
     TAG = args.tag
@@ -78,6 +84,8 @@ if __name__ == '__main__':
     F_HIGH = 5
     WRENCH_AVERAGE_WINDOW = 1
     TEMPORAL_DOWNSAMPLE_RATIO = args.temporal_downsample_ratio
+    STACK_TEMPORAL_DOWNSAMPLE_RATIO = args.stack_temporal_downsample_ratio
+    DONE_LAST_K = args.done_last_k
     SENSOR_MODE = args.sensor_mode
     DEBUG = args.debug
     DEBUG_START_SEQ_IDX = args.debug_start_seq_idx
@@ -92,17 +100,29 @@ if __name__ == '__main__':
 
     data_dir = f'/mnt/data/users/lifeng/{TAG}'
     save_data_dir = f'/mnt/data/users/lifeng/{TAG}'
+    STIFFNESS_COMPENSATION=False
+    if STIFFNESS_COMPENSATION:
+        save_data_dir += '_sc'
     if TEMPORAL_DOWNSAMPLE_RATIO > 1:
         save_data_dir += f'_downsample{TEMPORAL_DOWNSAMPLE_RATIO}'
+    if STACK_TEMPORAL_DOWNSAMPLE_RATIO > 1:
+        save_data_dir += f'_stack_downsample{STACK_TEMPORAL_DOWNSAMPLE_RATIO}'
     if DEBUG:
         save_data_dir += '_debug'
     save_data_dir += '_zarr'
-    save_data_path = osp.join(osp.join(osp.abspath(os.getcwd()), save_data_dir, f'replay_buffer.zarr'))
+    save_data_path = osp.join(save_data_dir, f'replay_buffer.zarr')
     os.makedirs(save_data_dir, exist_ok=True)
     if os.path.exists(save_data_path):
+        if args.resume:
+            logger.info('Data already exists at {}, skipping (--resume flag set)'.format(save_data_path))
+            exit(0)
         logger.info('Data already exists at {}'.format(save_data_path))
-        logger.warning('Overwriting {}'.format(save_data_path))
-        os.system('rm -rf {}'.format(save_data_path))
+        # use py_cli_interaction to ask user if they want to overwrite the data
+        if py_cli_interaction.parse_cli_bool('Do you want to overwrite the data?', default_value=True)[0]:
+            logger.warning('Overwriting {}'.format(save_data_path))
+            os.system('rm -rf {}'.format(save_data_path))
+        else:
+            exit()
 
     # loading config for transforms
     with initialize(config_path='ImplicitRDP/config', version_base="1.3"):
@@ -170,11 +190,26 @@ if __name__ == '__main__':
     left_robot_tcp_wrench_arrays = []
     left_robot_gripper_width_arrays = []
     left_robot_gripper_force_arrays = []
+    left_robot_tcp_pose_stack_arrays = []
+    left_robot_tcp_vel_stack_arrays = []
+    left_robot_tcp_wrench_stack_arrays = []
+    left_robot_gripper_width_stack_arrays = []
+    left_robot_gripper_force_stack_arrays = []
     right_robot_tcp_pose_arrays = []
     right_robot_tcp_vel_arrays = []
     right_robot_tcp_wrench_arrays = []
     right_robot_gripper_width_arrays = []
     right_robot_gripper_force_arrays = []
+    right_robot_tcp_pose_stack_arrays = []
+    right_robot_tcp_vel_stack_arrays = []
+    right_robot_tcp_wrench_stack_arrays = []
+    right_robot_gripper_width_stack_arrays = []
+    right_robot_gripper_force_stack_arrays = []
+
+    tcp_predicted_latent_action_arrays = []
+    gripper_predicted_latent_action_arrays = []
+    tcp_extended_obs_step_arrays = []
+    gripper_extended_obs_step_arrays = []
 
     episode_ends_arrays = []
     total_count = 0
@@ -214,6 +249,37 @@ if __name__ == '__main__':
             right_robot_tcp_wrench_arrays.append(obs_dict['right_robot_tcp_wrench'])
             right_robot_gripper_width_arrays.append(obs_dict['right_robot_gripper_width'])
             right_robot_gripper_force_arrays.append(obs_dict['right_robot_gripper_force'])
+
+            if 'left_robot_tcp_pose_stack' in obs_dict:
+                left_robot_tcp_pose_stack_arrays.append(obs_dict['left_robot_tcp_pose_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+            if 'left_robot_tcp_vel_stack' in obs_dict:
+                left_robot_tcp_vel_stack_arrays.append(obs_dict['left_robot_tcp_vel_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+            if 'left_robot_tcp_wrench_stack' in obs_dict:
+                left_robot_tcp_wrench_stack_arrays.append(obs_dict['left_robot_tcp_wrench_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+            if 'left_robot_gripper_width_stack' in obs_dict:
+                left_robot_gripper_width_stack_arrays.append(obs_dict['left_robot_gripper_width_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+            if 'left_robot_gripper_force_stack' in obs_dict:
+                left_robot_gripper_force_stack_arrays.append(obs_dict['left_robot_gripper_force_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+
+            if 'right_robot_tcp_pose_stack' in obs_dict:
+                right_robot_tcp_pose_stack_arrays.append(obs_dict['right_robot_tcp_pose_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+            if 'right_robot_tcp_vel_stack' in obs_dict:
+                right_robot_tcp_vel_stack_arrays.append(obs_dict['right_robot_tcp_vel_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+            if 'right_robot_tcp_wrench_stack' in obs_dict:
+                right_robot_tcp_wrench_stack_arrays.append(obs_dict['right_robot_tcp_wrench_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+            if 'right_robot_gripper_width_stack' in obs_dict:
+                right_robot_gripper_width_stack_arrays.append(obs_dict['right_robot_gripper_width_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+            if 'right_robot_gripper_force_stack' in obs_dict:
+                right_robot_gripper_force_stack_arrays.append(obs_dict['right_robot_gripper_force_stack'][::-1][::STACK_TEMPORAL_DOWNSAMPLE_RATIO][::-1])
+
+            if 'tcp_predicted_latent_action' in obs_dict:
+                tcp_predicted_latent_action_arrays.append(obs_dict['tcp_predicted_latent_action'])
+            if 'gripper_predicted_latent_action' in obs_dict:
+                gripper_predicted_latent_action_arrays.append(obs_dict['gripper_predicted_latent_action'])
+            if 'tcp_extended_obs_step' in obs_dict:
+                tcp_extended_obs_step_arrays.append(obs_dict['tcp_extended_obs_step'])
+            if 'gripper_extended_obs_step' in obs_dict:
+                gripper_extended_obs_step_arrays.append(obs_dict['gripper_extended_obs_step'])
 
             external_img_arrays.append(obs_dict['external_img'])
             left_wrist_img_arrays.append(obs_dict['left_wrist_img'])
@@ -299,33 +365,101 @@ if __name__ == '__main__':
     right_robot_tcp_wrench_arrays = np.stack(right_robot_tcp_wrench_arrays, axis=0)
     right_robot_gripper_width_arrays = np.stack(right_robot_gripper_width_arrays, axis=0)
     right_robot_gripper_force_arrays = np.stack(right_robot_gripper_force_arrays, axis=0)
+
+    if len(left_robot_tcp_pose_stack_arrays) > 0:
+        left_robot_tcp_pose_stack_arrays = np.stack(left_robot_tcp_pose_stack_arrays, axis=0)
+    if len(left_robot_tcp_vel_stack_arrays) > 0:
+        left_robot_tcp_vel_stack_arrays = np.stack(left_robot_tcp_vel_stack_arrays, axis=0)
+    if len(left_robot_tcp_wrench_stack_arrays) > 0:
+        left_robot_tcp_wrench_stack_arrays = np.stack(left_robot_tcp_wrench_stack_arrays, axis=0)
+    if len(left_robot_gripper_width_stack_arrays) > 0:
+        left_robot_gripper_width_stack_arrays = np.stack(left_robot_gripper_width_stack_arrays, axis=0)
+    if len(left_robot_gripper_force_stack_arrays) > 0:
+        left_robot_gripper_force_stack_arrays = np.stack(left_robot_gripper_force_stack_arrays, axis=0)
+
+    if len(right_robot_tcp_pose_stack_arrays) > 0:
+        right_robot_tcp_pose_stack_arrays = np.stack(right_robot_tcp_pose_stack_arrays, axis=0)
+    if len(right_robot_tcp_vel_stack_arrays) > 0:
+        right_robot_tcp_vel_stack_arrays = np.stack(right_robot_tcp_vel_stack_arrays, axis=0)
+    if len(right_robot_tcp_wrench_stack_arrays) > 0:
+        right_robot_tcp_wrench_stack_arrays = np.stack(right_robot_tcp_wrench_stack_arrays, axis=0)
+    if len(right_robot_gripper_width_stack_arrays) > 0:
+        right_robot_gripper_width_stack_arrays = np.stack(right_robot_gripper_width_stack_arrays, axis=0)
+    if len(right_robot_gripper_force_stack_arrays) > 0:
+        right_robot_gripper_force_stack_arrays = np.stack(right_robot_gripper_force_stack_arrays, axis=0)
+
+    if len(tcp_predicted_latent_action_arrays) > 0:
+        tcp_predicted_latent_action_arrays = np.stack(tcp_predicted_latent_action_arrays, axis=0)
+    if len(gripper_predicted_latent_action_arrays) > 0:
+        gripper_predicted_latent_action_arrays = np.stack(gripper_predicted_latent_action_arrays, axis=0)
+    if len(tcp_extended_obs_step_arrays) > 0:
+        tcp_extended_obs_step_arrays = np.stack(tcp_extended_obs_step_arrays, axis=0)
+    if len(gripper_extended_obs_step_arrays) > 0:
+        gripper_extended_obs_step_arrays = np.stack(gripper_extended_obs_step_arrays, axis=0)
+
+    desired_state_arrays = np.array([])
+    state_stack_arrays = np.array([])
     if ACTION_TYPE == ActionType.left_arm_3D_translation_gripper_width: # (left_tcp_x, left_tcp_y, left_tcp_z, left_gripper_width)
+        # do not support desired state now
         state_arrays = np.concatenate([left_robot_tcp_pose_arrays[:, :3], left_robot_gripper_width_arrays], axis=-1)
+        if len(left_robot_tcp_pose_stack_arrays) > 0 and len(left_robot_gripper_width_stack_arrays) > 0:
+            state_stack_arrays = np.concatenate([left_robot_tcp_pose_stack_arrays[:, :, :3], left_robot_gripper_width_stack_arrays], axis=-1)
     elif ACTION_TYPE == ActionType.left_arm_6DOF_gripper_width: # (left_tcp_x, left_tcp_y, left_tcp_z, left_6d_rotation, left_gripper_width)
+        # do not support desired state now
         state_arrays = np.concatenate([left_robot_tcp_pose_arrays, left_robot_gripper_width_arrays], axis=-1)
+        if len(left_robot_tcp_pose_stack_arrays) > 0 and len(left_robot_gripper_width_stack_arrays) > 0:
+            state_stack_arrays = np.concatenate([left_robot_tcp_pose_stack_arrays, left_robot_gripper_width_stack_arrays], axis=-1)
     elif ACTION_TYPE == ActionType.left_arm_6DOF_gripper_width_emb: # (left_tcp_x, left_tcp_y, left_tcp_z, left_gripper_width, left_pca_embedding)
+        # do not support desired state now
         state_arrays = np.concatenate([left_robot_tcp_pose_arrays, left_robot_gripper_width_arrays,
                                        left_gripper2_marker_offset_emb_arrays], axis=-1)
+        if len(left_robot_tcp_pose_stack_arrays) > 0 and len(left_robot_gripper_width_stack_arrays) > 0:
+            raise NotImplementedError
     elif ACTION_TYPE == ActionType.right_arm_6DOF: # (right_tcp_x, right_tcp_y, right_tcp_z, right_6d_rotation)
         state_arrays = right_robot_tcp_pose_arrays
+        if len(right_robot_tcp_pose_stack_arrays) > 0:
+            state_stack_arrays = right_robot_tcp_pose_stack_arrays
     elif ACTION_TYPE == ActionType.right_arm_6DOF_virtual_target_stiffness: # (right_tcp_x, right_tcp_y, right_tcp_z, right_6d_rotation)
+        # do not support desired state now
         wrench_avg = moving_average(right_robot_tcp_wrench_arrays[:, :3], episode_ends_arrays, WRENCH_AVERAGE_WINDOW)
         stiffness = get_stiffness(wrench_avg, K_MAX, K_MIN, F_LOW, F_HIGH)
         offset = get_global_offset(wrench_avg / stiffness, right_robot_tcp_pose_arrays)
         offset = np.concatenate([offset, np.zeros_like(right_robot_tcp_pose_arrays[:, 3:])], axis=-1)
         state_arrays = np.concatenate([right_robot_tcp_pose_arrays, right_robot_tcp_pose_arrays - offset, stiffness], axis=-1)
+        if len(right_robot_tcp_pose_stack_arrays) > 0 and len(right_robot_tcp_wrench_stack_arrays) > 0:
+            wrench_avg = moving_average(right_robot_tcp_wrench_stack_arrays[:, :, :3], episode_ends_arrays, WRENCH_AVERAGE_WINDOW)
+            stiffness = get_stiffness(wrench_avg, K_MAX, K_MIN, F_LOW, F_HIGH)
+            offset = get_global_offset(wrench_avg / stiffness, right_robot_tcp_pose_stack_arrays)
+            offset = np.concatenate([offset, np.zeros_like(right_robot_tcp_pose_stack_arrays[:, :, 3:])], axis=-1)
+            state_stack_arrays = np.concatenate([right_robot_tcp_pose_stack_arrays, right_robot_tcp_pose_stack_arrays - offset, stiffness], axis=-1) 
     elif ACTION_TYPE == ActionType.right_arm_6DOF_wrench:
+        # do not support desired state now
         state_arrays = np.concatenate([right_robot_tcp_pose_arrays, right_robot_tcp_wrench_arrays], axis=-1)
+        if len(right_robot_tcp_pose_stack_arrays) > 0 and len(right_robot_tcp_wrench_stack_arrays) > 0:
+            state_stack_arrays = np.concatenate([right_robot_tcp_pose_stack_arrays, right_robot_tcp_wrench_stack_arrays], axis=-1)
     elif ACTION_TYPE == ActionType.right_arm_3D_translation: # (right_tcp_x, right_tcp_y, right_tcp_z)
         state_arrays = right_robot_tcp_pose_arrays[:, :3]
+        if len(right_robot_tcp_pose_stack_arrays) > 0:
+            state_stack_arrays = right_robot_tcp_pose_stack_arrays[:, :, :3]
     elif ACTION_TYPE == ActionType.right_arm_3D_translation_virtual_target_stiffness: # (right_tcp_x, right_tcp_y, right_tcp_z)
+        # do not support desired state now
         wrench_avg = moving_average(right_robot_tcp_wrench_arrays[:, :3], episode_ends_arrays, WRENCH_AVERAGE_WINDOW)
         stiffness = get_stiffness(wrench_avg, K_MAX, K_MIN, F_LOW, F_HIGH)
         offset = get_global_offset(wrench_avg / stiffness, right_robot_tcp_pose_arrays)
         state_arrays = np.concatenate([right_robot_tcp_pose_arrays[:, :3], right_robot_tcp_pose_arrays[:, :3] - offset, stiffness], axis=-1)
+        if len(right_robot_tcp_pose_stack_arrays) > 0 and len(right_robot_tcp_wrench_stack_arrays) > 0:
+            wrench_avg = moving_average(right_robot_tcp_wrench_stack_arrays[:, :, :3], episode_ends_arrays, WRENCH_AVERAGE_WINDOW)
+            stiffness = get_stiffness(wrench_avg, K_MAX, K_MIN, F_LOW, F_HIGH)
+            offset = get_global_offset(wrench_avg / stiffness, right_robot_tcp_pose_stack_arrays)
+            state_stack_arrays = np.concatenate([right_robot_tcp_pose_stack_arrays[:, :, :3], right_robot_tcp_pose_stack_arrays[:, :, :3] - offset, stiffness], axis=-1)
     elif ACTION_TYPE == ActionType.dual_arm_3D_translation_gripper_width: # (left_tcp_x, left_tcp_y, left_tcp_z, right_tcp_x, right_tcp_y, right_tcp_z, left_gripper_width, right_gripper_width)
+        # do not support desired state now
         state_arrays = np.concatenate([left_robot_tcp_pose_arrays[:, :3], right_robot_tcp_pose_arrays[:, :3],
                                        left_robot_gripper_width_arrays, right_robot_gripper_width_arrays], axis=-1)
+        if len(left_robot_tcp_pose_stack_arrays) > 0 and len(right_robot_tcp_pose_stack_arrays) > 0 and \
+            len(left_robot_gripper_width_stack_arrays) > 0 and len(right_robot_gripper_width_stack_arrays) > 0:
+            state_stack_arrays = np.concatenate([left_robot_tcp_pose_stack_arrays[:, :, :3], right_robot_tcp_pose_stack_arrays[:, :, :3],
+                                                 left_robot_gripper_width_stack_arrays, right_robot_gripper_width_stack_arrays], axis=-1)
     else:
         # TODO: support left_gripper1_marker_offset_emb_arrays
         # TODO: support right_gripper1_marker_offset_emb_arrays
@@ -340,8 +474,32 @@ if __name__ == '__main__':
         # fix the last action of each episode
         for i in range(0, len(episode_ends_arrays)):
             action_arrays[episode_ends_arrays[i] - 1] = action_arrays[episode_ends_arrays[i] - 2]
+        
+        if len(desired_state_arrays) > 0:
+            new_desired_action_arrays = desired_state_arrays[1:, ...].copy()
+            desired_action_arrays = np.concatenate([new_desired_action_arrays, new_desired_action_arrays[-1][np.newaxis, :]], axis=0)
+            for i in range(0, len(episode_ends_arrays)):
+                desired_action_arrays[episode_ends_arrays[i] - 1] = desired_action_arrays[episode_ends_arrays[i] - 2]
+        else:
+            desired_action_arrays = np.array([])
+
+        if len(state_stack_arrays) > 0:
+            stack_n_steps = state_stack_arrays.shape[1]
+            new_action_stack_arrays = state_stack_arrays.reshape(-1, state_stack_arrays.shape[2])[1:, ...].copy()
+            action_stack_arrays = np.concatenate([new_action_stack_arrays, new_action_stack_arrays[-1][np.newaxis, :]], axis=0)
+            for i in range(0, len(episode_ends_arrays)):
+                action_stack_arrays[episode_ends_arrays[i] * stack_n_steps - 1] = action_stack_arrays[episode_ends_arrays[i] * stack_n_steps - 2]
+            action_stack_arrays = action_stack_arrays.reshape(-1, stack_n_steps, action_stack_arrays.shape[1])
+            assert len(action_stack_arrays) == len(action_arrays), f"state stack arrays and action stack arrays have different lengths"
+            logger.info(f'Generated state stack arrays of shape {state_stack_arrays.shape}, action stack arrays of shape {action_stack_arrays.shape}')
+        else:
+            action_stack_arrays = np.array([])
     else:
         raise NotImplementedError
+
+    done_arrays = np.zeros(len(action_arrays), dtype=np.int32)
+    for i in range(0, len(episode_ends_arrays)):
+        done_arrays[episode_ends_arrays[i] - DONE_LAST_K:episode_ends_arrays[i]] = 1
 
     # If no filtering, just rename
     valid_mask = np.ones(len(action_arrays), dtype=bool)
@@ -362,7 +520,7 @@ if __name__ == '__main__':
                     motion_dim = 10
                 elif ACTION_TYPE in [
                         ActionType.right_arm_6DOF_virtual_target_stiffness,
-                        ActionType.right_arm_6DOF_wrench
+                        ActionType.right_arm_6DOF_wrench,
                 ]:
                     motion_dim = 9
                 elif ACTION_TYPE == ActionType.right_arm_3D_translation_virtual_target_stiffness:
@@ -403,6 +561,12 @@ if __name__ == '__main__':
         # Downsample all arrays
         state_arrays = state_arrays[keep_indices]
         action_arrays = action_arrays[keep_indices]
+        if len(desired_action_arrays) > 0:
+            desired_action_arrays = desired_action_arrays[keep_indices]
+        if len(state_stack_arrays) > 0:
+            state_stack_arrays = state_stack_arrays[keep_indices]
+            action_stack_arrays = action_stack_arrays[keep_indices]
+        done_arrays = done_arrays[keep_indices]
         timestamp_arrays = timestamp_arrays[keep_indices]
         external_img_arrays = external_img_arrays[keep_indices]
         left_wrist_img_arrays = left_wrist_img_arrays[keep_indices]
@@ -438,6 +602,37 @@ if __name__ == '__main__':
         right_robot_tcp_wrench_arrays = right_robot_tcp_wrench_arrays[keep_indices]
         right_robot_gripper_width_arrays = right_robot_gripper_width_arrays[keep_indices]
         right_robot_gripper_force_arrays = right_robot_gripper_force_arrays[keep_indices]
+        
+        if len(left_robot_tcp_pose_stack_arrays) > 0:
+            left_robot_tcp_pose_stack_arrays = left_robot_tcp_pose_stack_arrays[keep_indices]
+        if len(left_robot_tcp_vel_stack_arrays) > 0:
+            left_robot_tcp_vel_stack_arrays = left_robot_tcp_vel_stack_arrays[keep_indices]
+        if len(left_robot_tcp_wrench_stack_arrays) > 0:
+            left_robot_tcp_wrench_stack_arrays = left_robot_tcp_wrench_stack_arrays[keep_indices]
+        if len(left_robot_gripper_width_stack_arrays) > 0:
+            left_robot_gripper_width_stack_arrays = left_robot_gripper_width_stack_arrays[keep_indices]
+        if len(left_robot_gripper_force_stack_arrays) > 0:
+            left_robot_gripper_force_stack_arrays = left_robot_gripper_force_stack_arrays[keep_indices]
+
+        if len(right_robot_tcp_pose_stack_arrays) > 0:
+            right_robot_tcp_pose_stack_arrays = right_robot_tcp_pose_stack_arrays[keep_indices]
+        if len(right_robot_tcp_vel_stack_arrays) > 0:
+            right_robot_tcp_vel_stack_arrays = right_robot_tcp_vel_stack_arrays[keep_indices]
+        if len(right_robot_tcp_wrench_stack_arrays) > 0:
+            right_robot_tcp_wrench_stack_arrays = right_robot_tcp_wrench_stack_arrays[keep_indices]
+        if len(right_robot_gripper_width_stack_arrays) > 0:
+            right_robot_gripper_width_stack_arrays = right_robot_gripper_width_stack_arrays[keep_indices]
+        if len(right_robot_gripper_force_stack_arrays) > 0:
+            right_robot_gripper_force_stack_arrays = right_robot_gripper_force_stack_arrays[keep_indices]
+
+        if len(tcp_predicted_latent_action_arrays) > 0:
+            tcp_predicted_latent_action_arrays = tcp_predicted_latent_action_arrays[keep_indices]
+        if len(gripper_predicted_latent_action_arrays) > 0:
+            gripper_predicted_latent_action_arrays = gripper_predicted_latent_action_arrays[keep_indices]
+        if len(tcp_extended_obs_step_arrays) > 0:
+            tcp_extended_obs_step_arrays = tcp_extended_obs_step_arrays[keep_indices]
+        if len(gripper_extended_obs_step_arrays) > 0:
+            gripper_extended_obs_step_arrays = gripper_extended_obs_step_arrays[keep_indices]
 
         # Recalculate episode_ends
         new_episode_ends = []
@@ -514,6 +709,9 @@ if __name__ == '__main__':
         action_chunk_size = (10000, action_arrays.shape[1])
     else:
         raise NotImplementedError
+    if len(state_stack_arrays) > 0:
+        if len(action_stack_arrays.shape) == 3:
+            action_stack_chunk_size = (10000, action_stack_arrays.shape[1])
 
     compressor = zarr.Blosc(cname='zstd', clevel=3, shuffle=1)
     zarr_data.create_dataset('timestamp', data=timestamp_arrays, chunks=(10000,), dtype='float32', overwrite=True,
@@ -538,10 +736,64 @@ if __name__ == '__main__':
                                 compressor=compressor)
     zarr_data.create_dataset('right_robot_gripper_force', data=right_robot_gripper_force_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
                                 compressor=compressor)
+    if len(left_robot_tcp_pose_stack_arrays) > 0:
+        zarr_data.create_dataset('left_robot_tcp_pose_stack', data=left_robot_tcp_pose_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(left_robot_tcp_vel_stack_arrays) > 0:
+        zarr_data.create_dataset('left_robot_tcp_vel_stack', data=left_robot_tcp_vel_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(left_robot_tcp_wrench_stack_arrays) > 0:
+        zarr_data.create_dataset('left_robot_tcp_wrench_stack', data=left_robot_tcp_wrench_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(left_robot_gripper_width_stack_arrays) > 0:
+        zarr_data.create_dataset('left_robot_gripper_width_stack', data=left_robot_gripper_width_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(left_robot_gripper_force_stack_arrays) > 0:
+        zarr_data.create_dataset('left_robot_gripper_force_stack', data=left_robot_gripper_force_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+
+    if len(right_robot_tcp_pose_stack_arrays) > 0:
+        zarr_data.create_dataset('right_robot_tcp_pose_stack', data=right_robot_tcp_pose_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(right_robot_tcp_vel_stack_arrays) > 0:
+        zarr_data.create_dataset('right_robot_tcp_vel_stack', data=right_robot_tcp_vel_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(right_robot_tcp_wrench_stack_arrays) > 0:
+        zarr_data.create_dataset('right_robot_tcp_wrench_stack', data=right_robot_tcp_wrench_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(right_robot_gripper_width_stack_arrays) > 0:
+        zarr_data.create_dataset('right_robot_gripper_width_stack', data=right_robot_gripper_width_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(right_robot_gripper_force_stack_arrays) > 0:
+        zarr_data.create_dataset('right_robot_gripper_force_stack', data=right_robot_gripper_force_stack_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+
+    if len(tcp_predicted_latent_action_arrays) > 0:
+        zarr_data.create_dataset('tcp_predicted_latent_action', data=tcp_predicted_latent_action_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(gripper_predicted_latent_action_arrays) > 0:
+        zarr_data.create_dataset('gripper_predicted_latent_action', data=gripper_predicted_latent_action_arrays, chunks=(10000,), dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(tcp_extended_obs_step_arrays) > 0:
+        zarr_data.create_dataset('tcp_extended_obs_step', data=tcp_extended_obs_step_arrays, chunks=(10000,), dtype='int32', overwrite=True,
+                                compressor=compressor)
+    if len(gripper_extended_obs_step_arrays) > 0:
+        zarr_data.create_dataset('gripper_extended_obs_step', data=gripper_extended_obs_step_arrays, chunks=(10000,), dtype='int32', overwrite=True,
+                                compressor=compressor)
 
     zarr_data.create_dataset('target', data=state_arrays, chunks=action_chunk_size, dtype='float32', overwrite=True,
                              compressor=compressor)
     zarr_data.create_dataset('action', data=action_arrays, chunks=action_chunk_size, dtype='float32', overwrite=True,
+                             compressor=compressor)
+    if len(desired_action_arrays) > 0:
+        zarr_data.create_dataset('desired_action', data=desired_action_arrays, chunks=action_chunk_size, dtype='float32', overwrite=True,
+                                compressor=compressor)
+    if len(state_stack_arrays) > 0:
+        zarr_data.create_dataset('target_stack', data=state_stack_arrays, chunks=action_stack_chunk_size, dtype='float32', overwrite=True,
+                             compressor=compressor)
+        zarr_data.create_dataset('action_stack', data=action_stack_arrays, chunks=action_stack_chunk_size, dtype='float32', overwrite=True,
+                                compressor=compressor)
+    zarr_data.create_dataset('done', data=done_arrays, chunks=(10000,), dtype='int32', overwrite=True,
                              compressor=compressor)
     zarr_meta.create_dataset('episode_ends', data=episode_ends_arrays, chunks=(10000,), dtype='int64', overwrite=True,
                              compressor=compressor)

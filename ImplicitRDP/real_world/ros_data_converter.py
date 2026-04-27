@@ -83,9 +83,26 @@ class ROS2DataConverter:
 
         left_gripper_state_array = np.array([left_gripper_state.position[0], left_gripper_state.effort[0]])
         right_gripper_state_array = np.array([right_gripper_state.position[0], right_gripper_state.effort[0]])
+        stacked_robot_states = {}
+        for topic_name in topic_dict.keys():
+            if topic_name.endswith('_stack'):
+                if "pose" in topic_name:
+                    last_shape = 6
+                elif "vel" in topic_name:
+                    last_shape = 6
+                elif "wrench" in topic_name:
+                    last_shape = 6
+                elif "gripper_state" in topic_name:
+                    last_shape = 2
+                else:
+                    raise ValueError(f"Unknown topic name: {topic_name}")
+
+                stacked_robot_states[topic_name] = np.frombuffer(topic_dict[topic_name].position)
+                stacked_robot_states[topic_name] = stacked_robot_states[topic_name].reshape(-1, last_shape)
 
         return (left_tcp_pose_array, right_tcp_pose_array, left_tcp_vel_array, right_tcp_vel_array,
-                left_tcp_wrench_array, right_tcp_wrench_array, left_gripper_state_array, right_gripper_state_array)
+                left_tcp_wrench_array, right_tcp_wrench_array, left_gripper_state_array, right_gripper_state_array,
+                stacked_robot_states)
     
     def decode_depth_rgb_image(self, msg: Image) -> np.ndarray:
         # Decode the image from JPEG format
@@ -190,7 +207,8 @@ class ROS2DataConverter:
                                 for msg in topic_dict.values()])
 
         (left_tcp_pose, right_tcp_pose, left_tcp_vel, right_tcp_vel,
-         left_tcp_wrench, right_tcp_wrench, left_gripper_state, right_gripper_state) = self.convert_robot_states(topic_dict)
+         left_tcp_wrench, right_tcp_wrench, left_gripper_state, right_gripper_state,
+         stacked_robot_states) = self.convert_robot_states(topic_dict)
         depth_camera_pointcloud_list, depth_camera_rgb_list = self.convert_depth_camera(topic_dict)
         tactile_camera_rgb_list, tactile_camera_marker_loc_list, tactile_camera_marker_offset_list = self.convert_tactile_camera(topic_dict)
 
@@ -205,15 +223,18 @@ class ROS2DataConverter:
             'leftRobotGripperState': left_gripper_state,
             'rightRobotGripperState': right_gripper_state,
         }
-
-        if '/left_tcp_wrench_stack' in topic_dict:
-            sensor_msg_args['leftRobotTCPWrenchStack'] = self.decode_joint_state_stack(
-                topic_dict['/left_tcp_wrench_stack'], element_dim=6
-            )
-        if '/right_tcp_wrench_stack' in topic_dict:
-            sensor_msg_args['rightRobotTCPWrenchStack'] = self.decode_joint_state_stack(
-                topic_dict['/right_tcp_wrench_stack'], element_dim=6
-            )
+        for sensor_name, sensor_value in stacked_robot_states.items():
+            splitted_sensor_name = sensor_name[1:].split("_")
+            splitted_sensor_name.insert(1, "robot")
+            for i in range(1, len(splitted_sensor_name)):
+                if splitted_sensor_name[i] == "tcp":
+                    splitted_sensor_name[i] = "TCP"
+                else:
+                    splitted_sensor_name[i] = splitted_sensor_name[i].capitalize()
+            if "Pose" in splitted_sensor_name:
+                splitted_sensor_name.remove("Pose")
+            sensor_name = "".join(splitted_sensor_name)
+            sensor_msg_args[sensor_name] = sensor_value
 
         if depth_camera_pointcloud_list[0] is not None:
             sensor_msg_args['externalCameraPointCloud'] = depth_camera_pointcloud_list[0]

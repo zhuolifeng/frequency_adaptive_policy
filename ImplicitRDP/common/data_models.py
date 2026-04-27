@@ -47,6 +47,7 @@ class MoveGripperRequest(BaseModel):
 
 class TargetTCPRequest(BaseModel):
     target_tcp: List[float]  # (7) (x, y, z, qw, qx, qy, qz)
+    type: str = "reference" # "reference" or "virtual"
 
 class ActionPrimitiveRequest(BaseModel):
     primitive_name: str
@@ -69,10 +70,16 @@ class SensorMessage(BaseModel):
     rightRobotTCPVel: np.ndarray = Field(default_factory=lambda: np.zeros((6, ), dtype=np.float32))  # (6) (vx, vy, vz, wx, wy, wz)
     leftRobotTCPWrench: np.ndarray = Field(default_factory=lambda: np.zeros((6, ), dtype=np.float32))  # (6) (fx, fy, fz, mx, my, mz)
     rightRobotTCPWrench: np.ndarray = Field(default_factory=lambda: np.zeros((6, ), dtype=np.float32))  # (6) (fx, fy, fz, mx, my, mz)
-    leftRobotTCPWrenchStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, 6), dtype=np.float32))  # (T, 6)
-    rightRobotTCPWrenchStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, 6), dtype=np.float32))  # (T, 6)
     leftRobotGripperState: np.ndarray = Field(default_factory=lambda: np.zeros((2, ), dtype=np.float32))  # (2) gripper (width, force)
     rightRobotGripperState: np.ndarray = Field(default_factory=lambda: np.zeros((2, ), dtype=np.float32))  # (2) gripper (width, force)
+    leftRobotTCPStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    rightRobotTCPStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    leftRobotTCPVelStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    rightRobotTCPVelStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    leftRobotTCPWrenchStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    rightRobotTCPWrenchStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    leftRobotGripperStateStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    rightRobotGripperStateStack: np.ndarray = Field(default_factory=lambda: np.zeros((0, ), dtype=np.float32))
     externalCameraPointCloud: np.ndarray = Field(default_factory=lambda: np.zeros((10, 6), dtype=np.float16)) # (N, 6) (x, y, z, r, g, b)
     externalCameraRGB: np.ndarray = Field(default_factory=lambda: np.zeros((48, 64, 3), dtype=np.uint8))  # (H, W, 3) (r, g, b)
     leftWristCameraPointCloud: np.ndarray = Field(default_factory=lambda: np.zeros((10, 6), dtype=np.float16))  # (N, 6) (x, y, z, r, g, b)
@@ -101,6 +108,12 @@ class SensorMessage(BaseModel):
         default_factory=lambda: np.zeros((63, 3), dtype=np.float32))  # (num_markers, 3)(x, y, z)
     rightGripperCameraMarkerOffset2: np.ndarray = Field(
         default_factory=lambda: np.zeros((63, 3), dtype=np.float32))  # (num_markers, 3)(x, y, z)
+    tcpPredictedLatentAction: np.ndarray = Field(
+        default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    gripperPredictedLatentAction: np.ndarray = Field(
+        default_factory=lambda: np.zeros((0, ), dtype=np.float32))
+    tcpExtendedObsStep: int = Field(default_factory=lambda: 0)
+    gripperExtendedObsStep: int = Field(default_factory=lambda: 0)
 
     class Config:
         arbitrary_types_allowed = True

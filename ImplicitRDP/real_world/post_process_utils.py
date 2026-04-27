@@ -42,23 +42,49 @@ class DataPostProcessingManager:
         obs_dict['left_robot_tcp_pose'] = sensor_msg.leftRobotTCP
         obs_dict['left_robot_tcp_vel'] = sensor_msg.leftRobotTCPVel
         obs_dict['left_robot_tcp_wrench'] = sensor_msg.leftRobotTCPWrench
-        if sensor_msg.leftRobotTCPWrenchStack.size > 0:
-            obs_dict['left_robot_tcp_wrench_stack'] = sensor_msg.leftRobotTCPWrenchStack
         obs_dict['left_robot_gripper_width'] = sensor_msg.leftRobotGripperState[0][np.newaxis]
         obs_dict['left_robot_gripper_force'] = sensor_msg.leftRobotGripperState[1][np.newaxis]
+        if sensor_msg.leftRobotTCPStack.shape[0] > 0:
+            obs_dict['left_robot_tcp_pose_stack'] = sensor_msg.leftRobotTCPStack
+        if sensor_msg.leftRobotTCPVelStack.shape[0] > 0:
+            obs_dict['left_robot_tcp_vel_stack'] = sensor_msg.leftRobotTCPVelStack
+        if sensor_msg.leftRobotTCPWrenchStack.shape[0] > 0:
+            obs_dict['left_robot_tcp_wrench_stack'] = sensor_msg.leftRobotTCPWrenchStack
+        if sensor_msg.leftRobotGripperStateStack.shape[0] > 0:
+            obs_dict['left_robot_gripper_width_stack'] = sensor_msg.leftRobotGripperStateStack[:, 0]
+        if sensor_msg.leftRobotGripperStateStack.shape[0] > 0:
+            obs_dict['left_robot_gripper_force_stack'] = sensor_msg.leftRobotGripperStateStack[:, 1]
 
         # Add independent key-value pairs for right robot
         obs_dict['right_robot_tcp_pose'] = sensor_msg.rightRobotTCP
         obs_dict['right_robot_tcp_vel'] = sensor_msg.rightRobotTCPVel
         obs_dict['right_robot_tcp_wrench'] = sensor_msg.rightRobotTCPWrench
-        if sensor_msg.rightRobotTCPWrenchStack.size > 0:
-            obs_dict['right_robot_tcp_wrench_stack'] = sensor_msg.rightRobotTCPWrenchStack
         obs_dict['right_robot_gripper_width'] = sensor_msg.rightRobotGripperState[0][np.newaxis]
         obs_dict['right_robot_gripper_force'] = sensor_msg.rightRobotGripperState[1][np.newaxis]
+        if sensor_msg.rightRobotTCPStack.shape[0] > 0:
+            obs_dict['right_robot_tcp_pose_stack'] = sensor_msg.rightRobotTCPStack
+        if sensor_msg.rightRobotTCPVelStack.shape[0] > 0:
+            obs_dict['right_robot_tcp_vel_stack'] = sensor_msg.rightRobotTCPVelStack
+        if sensor_msg.rightRobotTCPWrenchStack.shape[0] > 0:
+            obs_dict['right_robot_tcp_wrench_stack'] = sensor_msg.rightRobotTCPWrenchStack
+        if sensor_msg.rightRobotGripperStateStack.shape[0] > 0:
+            obs_dict['right_robot_gripper_width_stack'] = sensor_msg.rightRobotGripperStateStack[:, 0]
+        if sensor_msg.rightRobotGripperStateStack.shape[0] > 0:
+            obs_dict['right_robot_gripper_force_stack'] = sensor_msg.rightRobotGripperStateStack[:, 1]
         
         if self.use_6d_rotation:
             obs_dict['left_robot_tcp_pose'] = pose_6d_to_pose_9d(obs_dict['left_robot_tcp_pose'])
             obs_dict['right_robot_tcp_pose'] = pose_6d_to_pose_9d(obs_dict['right_robot_tcp_pose'])
+            if sensor_msg.leftRobotTCPStack.shape[0] > 0:
+                left_robot_tcp_pose_stack = []
+                for i in range(sensor_msg.leftRobotTCPStack.shape[0]):
+                    left_robot_tcp_pose_stack.append(pose_6d_to_pose_9d(obs_dict['left_robot_tcp_pose_stack'][i]))
+                obs_dict['left_robot_tcp_pose_stack'] = np.array(left_robot_tcp_pose_stack)
+            if sensor_msg.rightRobotTCPStack.shape[0] > 0:
+                right_robot_tcp_pose_stack = []
+                for i in range(sensor_msg.rightRobotTCPStack.shape[0]):
+                    right_robot_tcp_pose_stack.append(pose_6d_to_pose_9d(obs_dict['right_robot_tcp_pose_stack'][i]))
+                obs_dict['right_robot_tcp_pose_stack'] = np.array(right_robot_tcp_pose_stack)
 
         if self.debug:
             logger.debug(f'left_robot_tcp_pose: {obs_dict["left_robot_tcp_pose"]}, '
@@ -72,7 +98,17 @@ class DataPostProcessingManager:
             logger.debug(f'left_robot_gripper_force: {obs_dict["left_robot_gripper_force"]}, '
                             f'right_robot_gripper_force: {obs_dict["right_robot_gripper_force"]}')
 
-        # 3. Image
+        # 3. (Optional) Predicted latent action
+        if sensor_msg.tcpPredictedLatentAction.shape[0] > 0:
+            obs_dict['tcp_predicted_latent_action'] = sensor_msg.tcpPredictedLatentAction
+        if sensor_msg.gripperPredictedLatentAction.shape[0] > 0:
+            obs_dict['gripper_predicted_latent_action'] = sensor_msg.gripperPredictedLatentAction
+        if sensor_msg.tcpExtendedObsStep > 0:
+            obs_dict['tcp_extended_obs_step'] = sensor_msg.tcpExtendedObsStep
+        if sensor_msg.gripperExtendedObsStep > 0:
+            obs_dict['gripper_extended_obs_step'] = sensor_msg.gripperExtendedObsStep
+
+        # 4. Image
         # TODO: make all sensor post-processing in parallel
         obs_dict['external_img'] = self.resize_image_by_size(sensor_msg.externalCameraRGB, size=self.resize_shape)
         if self.debug:
