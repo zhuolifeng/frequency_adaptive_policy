@@ -14,8 +14,8 @@ import json
 
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
-from ImplicitRDP.policy.hybrid_diffusion_act_policy import HybridDiffusionACTPolicy
-from ImplicitRDP.policy.hybrid_diffusion_act_stagewise_policy import HybridDiffusionACTStagewisePolicy
+from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
+from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
 from ImplicitRDP.policy.act_confidence_policy import ACTConfidencePolicy
 from ImplicitRDP.policy.act_confidence_dual_encoder_policy import ACTConfidenceDualEncoderPolicy
 from ImplicitRDP.policy.act_confidence_dual_encoder_stagewise_policy import ACTConfidenceDualEncoderStagewisePolicy
@@ -438,13 +438,13 @@ def main(cfg):
 
     # Get policy
     policy = workspace.ema_model if cfg.training.use_ema else workspace.model
-    if not isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy, ACTConfidenceDualEncoderStagewisePolicy, ACTConfidenceStagewisePolicy, HybridDiffusionACTPolicy, HybridDiffusionACTStagewisePolicy, DiffusionTransformerImagePolicy)):
+    if not isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy, ACTConfidenceDualEncoderStagewisePolicy, ACTConfidenceStagewisePolicy, HybridDiffusionACTConfidencePolicy, HybridDiffusionACTConfidenceStagewisePolicy, DiffusionTransformerImagePolicy)):
         raise ValueError(f"Unsupported policy type: {type(policy)}")
 
     # Determine evaluation parameters
     if isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy, ACTConfidenceDualEncoderStagewisePolicy, ACTConfidenceStagewisePolicy)):
         has_confidence = policy.confidence_head is not None
-    elif isinstance(policy, (HybridDiffusionACTPolicy, HybridDiffusionACTStagewisePolicy)):
+    elif isinstance(policy, (HybridDiffusionACTConfidencePolicy, HybridDiffusionACTConfidenceStagewisePolicy)):
         has_confidence = hasattr(policy, 'confidence_head') and policy.confidence_head is not None
     else:  # DiffusionTransformerImagePolicy
         has_confidence = False

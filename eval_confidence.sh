@@ -1,7 +1,7 @@
 #!/bin/bash
 
 TASK="dual_switch"
-DATASET_VERSION="v4.2"
+DATASET_VERSION="v5.2"
 ROUND="1"
 
 # ============================================================
@@ -14,14 +14,14 @@ ROUND="1"
 #   train_hybrid_diffusion_act_workspace
 #   train_hybrid_diffusion_act_stagewise_workspace
 # ============================================================
-CONFIG_NAME="train_hybrid_diffusion_act_stagewise_workspace"
+CONFIG_NAME="train_reactive_diffusion_transformer_real_image_workspace"
 
 # ============================================================
 # Checkpoint path（根据使用的策略切换）
 # ============================================================
 #/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.03.19/17.35-15_dual_switch_v3_to_v3_4_act_confidence_stagewise_policy_round_1_stage2/checkpoints 
 #/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.03.19/17.27-14_dual_switch_v3_to_v3_4_act_confidence_stagewise_policy_round_1_stage2/checkpoints
-CKPT_PATH="/mnt/workspace/users/lifeng/frequency_adaptive_policy/data/outputs/2026.04.03/00.22-12_train_hybrid_diffusion_act_stagewise_workspace_dual_switch_v4_policy_bigger_acp/checkpoints/latest.ckpt"
+CKPT_PATH="/mnt/workspace/users/lifeng/2026.04.27/13.34.05_train_reactive_diffusion_transformer_image_dual_switch_v5.1_policy_bigger_acp_round_1/checkpoints/latest.ckpt"
 
 # Dataset path
 DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr"
@@ -31,10 +31,10 @@ GPU_DEVICE="cuda:6"
 
 # Video settings
 VIDEO_FPS=1
-NUM_INFERENCE_STEPS=8
+NUM_INFERENCE_STEPS=5
 
 # Output directory for videos
-OUTPUT_DIR="evaluations_stagewise_collabation_hybrid_range_new_act"
+OUTPUT_DIR="evaluations_dp"
 
 # ============================================================
 # 根据 CONFIG_NAME 自动推导 transforms override，关闭随机数据增强
@@ -73,7 +73,7 @@ export CKPT_PATH="${CKPT_PATH}"
 export OUTPUT_DIR="${OUTPUT_DIR}"
 python eval_confidence.py \
     --config-name ${CONFIG_NAME} \
-    task=real_${TASK}_image_wrench_offline_10fps_acp \
+    task=real_${TASK}_image_wrench_offline_10fps \
     task.dataset_path=${DATASET_PATH} \
     +eval_batch_size=64 \
     +use_full_dataset=True \
