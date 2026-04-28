@@ -78,7 +78,7 @@ class BimanualFlexivServer():
                 pass
             else:
                 self.right_robot.robot.SwitchMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
-            self.right_robot.gripper.Move(0.05, 0.10, 50)
+            self.right_robot.gripper.Move(0, 0.10, 50)
 
         if use_planner and self.enable_left_arm and self.enable_right_arm:
             # TODO: support bimanual planner

@@ -37,12 +37,12 @@
 
 # ImplicitRDP w. Force (Box Flipping) v2
 python eval_real_robot_flexiv.py \
-   --config-name train_hybrid_diffusion_act_confidence_stagewise_workspace \
+   --config-name train_reactive_diffusion_transformer_real_image_workspace \
    policy.noise_scheduler.prediction_type=v_prediction \
-   task=real_dual_switch_image_wrench_offline_10fps_acp  \
+   task=real_dual_switch_image_wrench_offline_10fps  \
    task.env_runner.action_type=right_arm_6DOF \
    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
-   ckpt_path=/home/lifeng/Desktop/frequency_adaptive_policy/data/outputs/2026.04.03/00.22-12_train_hybrid_diffusion_act_stagewise_workspace_dual_switch_v4_policy_bigger_acp/checkpoints/latest.ckpt
+   ckpt_path=/home/lifeng/Desktop/frequency_adaptive_policy/data/outputs/2026.04.27/2026.04.27/13.34.05_train_reactive_diffusion_transformer_image_dual_switch_v5.1_policy_bigger_acp_round_1/checkpoints/latest.ckpt
 
 # ImplicitRDP w. Force (Box Flipping) v2, no auxiliary task
 # python eval_real_robot_flexiv.py \
