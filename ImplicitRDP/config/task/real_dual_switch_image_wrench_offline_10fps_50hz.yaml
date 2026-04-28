@@ -1,0 +1,27 @@
+defaults:
+  - real_dual_switch_image_wrench_offline_10fps@_here_
+  - _self_
+
+name: real_dual_switch_image_wrench_offline_10fps_50hz
+
+shape_meta:
+  extended_obs:
+    right_robot_tcp_wrench_stack:
+      shape: [6]
+      type: low_dim
+      flatten: True
+  action_stack:
+    shape: [19]
+
+model_shape_meta:
+  extended_obs:
+    right_robot_tcp_wrench_stack:
+      shape: [6]
+      type: low_dim
+      flatten: True
+  action_stack:
+    shape: [13]
+
+env_runner:
+  _target_: ImplicitRDP.env_runner.real_stable_reactive_runner_50hz.RealStableReactiveRunner
+  control_fps: 50
