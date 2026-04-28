@@ -200,7 +200,6 @@ class RealImageTactileDataset(BaseImageDataset):
             # action and obs
             recalculate_data_dict = {key: list() for key in (self.lowdim_keys + ['action']) if ('robot_tcp_pose' in key and 'wrt' not in key) or 'action' in key}
             recalculate_data_dict = {key: list() for key in (self.lowdim_keys + ['action'] + ['action_stack']) if ('robot_tcp_pose' in key and 'wrt' not in key) or 'action' in key or 'action_stack' in key}
-            #recalculate_data_dict = {key: list() for key in (self.lowdim_keys + ['action']) if ('robot_tcp_pose' in key and 'wrt' not in key) or 'action' in key}
             # extended_obs
             recalculate_data_dict.update({f"extended_{key}": list() for key in self.extended_lowdim_keys if 'robot_tcp_pose' in key and 'wrt' not in key})
             for data in tqdm.tqdm(self, leave=False, desc='Calculating updated action/obs for normalizer'):

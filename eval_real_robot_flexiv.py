@@ -7,6 +7,9 @@ from omegaconf import OmegaConf
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
+from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
+from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
+from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
 
@@ -70,6 +73,38 @@ def main(cfg):
 
         # set inference params
         policy.num_inference_steps = 8  # DDIM inference iterations
+    elif isinstance(policy, FMMultiFreqConfidencePolicy):
+        # FM Multi-Freq + Confidence policy (must check before FMMultiFreqPolicy since it's a subclass)
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        policy.num_inference_steps = cfg.policy.get('num_inference_steps', 5)
+        # inference head selection
+        policy.inference_head = cfg.policy.get('inference_head', '10hz')
+        policy.use_confidence_based_head_selection = cfg.policy.get('use_confidence_based_head_selection', True)
+        policy.confidence_threshold_for_head_selection = cfg.policy.get('confidence_threshold_for_head_selection', 0.0)
+        logger.info(f"FMMultiFreqConfidencePolicy: inference_head={policy.inference_head}, "
+                    f"use_confidence={policy.use_confidence_based_head_selection}, "
+                    f"threshold={policy.confidence_threshold_for_head_selection}")
+    elif isinstance(policy, FMMultiFreqPolicy):
+        # FM Multi-Freq policy (no confidence head)
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+        device = torch.device('cuda')
+        policy.eval().to(device)
+    elif isinstance(policy, FlowMatchingTransformerImagePolicy) or 'fm' in cfg.name:
+        # flow matching transformer model
+        policy: FlowMatchingTransformerImagePolicy
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        #logger.info(f"FlowMatchingTransformerImagePolicy: num_inference_steps={policy.num_inference_steps}")
     elif 'transformer' in cfg.name:
         # diffusion transformer model
         policy: DiffusionTransformerImagePolicy

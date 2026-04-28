@@ -19,6 +19,7 @@ import copy
 import random
 import tqdm
 import numpy as np
+import pickle
 
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
@@ -163,16 +164,21 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **val_dataloader_cfg)
 
-        # compute normalizer on all processes independently
-        # (deterministic given the same dataset, avoids multi-GPU file sync issues
-        # where ${now:...} in hydra output_dir can differ across ranks)
-        normalizer = dataset.get_normalizer()
-        if cfg.training.pretrained_ckpt_path is not None:
-            normalizer_state_dict = normalizer.state_dict()
-            current_normalizer_state_dict = self.model.normalizer.state_dict()
-            for key in current_normalizer_state_dict.keys():
-                normalizer_state_dict[key] = current_normalizer_state_dict[key]
-            normalizer.load_state_dict(normalizer_state_dict)
+        # compute normalizer on the main process and save to disk
+        normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
+        if accelerator.is_main_process:
+            normalizer = dataset.get_normalizer()
+            if cfg.training.pretrained_ckpt_path is not None:
+                normalizer_state_dict = normalizer.state_dict()
+                current_normalizer_state_dict = self.model.normalizer.state_dict()
+                for key in current_normalizer_state_dict.keys():
+                    normalizer_state_dict[key] = current_normalizer_state_dict[key]
+                normalizer.load_state_dict(normalizer_state_dict)
+            pickle.dump(normalizer, open(normalizer_path, 'wb'))
+
+        # load normalizer on all processes
+        accelerator.wait_for_everyone()
+        normalizer = pickle.load(open(normalizer_path, 'rb'))
 
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:

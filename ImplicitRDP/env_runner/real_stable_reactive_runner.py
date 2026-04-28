@@ -13,6 +13,9 @@ from rclpy.executors import MultiThreadedExecutor
 from omegaconf import DictConfig, ListConfig
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
+from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
+from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
+from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
 from ImplicitRDP.env.real_bimanual.real_env import RealRobotEnvironment
@@ -527,7 +530,7 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:
@@ -538,9 +541,14 @@ class RealStableReactiveRunner:
                 getattr(policy, 'rnn_obs_encoder', None) is not None
                 or getattr(policy, 'rnn_obs_encoder_act', None) is not None
                 or getattr(policy, 'rnn_obs_encoder_dp', None) is not None
-            ), "Policy should use an RNNObsEncoder for reactive transformer."
+                or (getattr(policy, 'rnn_lowfreq', None) is not None
+                    and getattr(policy, 'rnn_highfreq', None) is not None)
+            ), "Policy should use an RNNObsEncoder (or rnn_lowfreq/rnn_highfreq for FM multi-freq) for reactive transformer."
         else:
-            assert not hasattr(policy, 'rnn_obs_encoder') or policy.rnn_obs_encoder is None, "Policy should not use RNNObsEncoder when not using reactive transformer."
+            assert (
+                (not hasattr(policy, 'rnn_obs_encoder') or policy.rnn_obs_encoder is None)
+                and (not hasattr(policy, 'rnn_lowfreq') or policy.rnn_lowfreq is None)
+            ), "Policy should not use RNNObsEncoder when not using reactive transformer."
 
         device = policy.device
 

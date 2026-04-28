@@ -110,6 +110,8 @@ class RealRobotEnvironment(Node):
         self.debug = debug
         self.subscribers = []
         self.obs_and_sensor_msg_buffer = RingBuffer(size=1024, fps=max_fps)
+        self.fast_subscribers = []
+        self.fast_obs_and_sensor_msg_buffer = RingBuffer(size=1024, fps=max_fps)
 
         self.mutex = threading.Lock()
 
@@ -165,6 +167,8 @@ class RealRobotEnvironment(Node):
         # for calculating FPS
         self.prev_time = time.time()
         self.frame_count = 0
+        self.fast_prev_time = time.time()
+        self.fast_frame_count = 0
 
         if self.debug:
             logger.debug(f"Depth camera point cloud topic names: {depth_camera_point_cloud_topic_names}")
@@ -178,16 +182,30 @@ class RealRobotEnvironment(Node):
                                                 tactile_camera_rgb_topic_names,
                                                 tactile_camera_marker_topic_names,
                                                 debug=self.debug)
+        self.fast_data_converter = ROS2DataConverter(self.transforms,
+                                                debug=self.debug)
 
         for name, msg_type in subs_name_type:
             self.subscribers.append(Subscriber(self, msg_type, name))
             logger.debug(f"Subscribed to topic: {name} with type: {msg_type}")
+
+        for name, msg_type in subs_name_type:
+            if "_stack" in name:
+                continue
+            if msg_type in [Image, PointCloud2]:
+                continue
+            self.fast_subscribers.append(Subscriber(self, msg_type, name))
+            logger.debug(f"Subscribed to fast topic: {name} with type: {msg_type}")
 
         # ApproximateTimeSynchronizer is used to synchronize multiple topics
         self.ts = ApproximateTimeSynchronizer(self.subscribers, queue_size=250, slop=1,
                                               allow_headerless=False)
 
         self.ts.registerCallback(self.callback)
+
+        self.fast_ts = ApproximateTimeSynchronizer(self.fast_subscribers, queue_size=250, slop=1,
+                                            allow_headerless=False)
+        self.fast_ts.registerCallback(self.fast_callback)
 
         # Create a session with robot server
         self.session = requests.session()
@@ -248,6 +266,27 @@ class RealRobotEnvironment(Node):
             if self.time_check:
                 self.check_sync()
                 self.check_timestamp()
+    
+    def fast_callback(self, *msgs):
+        topic_dict = dict()
+        for i, msg in enumerate(msgs):
+            topic_name = self.fast_subscribers[i].topic
+            topic_dict[topic_name] = msg
+
+        sensor_msg: SensorMessage = self.fast_data_converter.convert_all_data(topic_dict)
+        obs_dict = self.data_processing_manager.convert_sensor_msg_to_obs_dict(sensor_msg)
+
+        self.fast_obs_and_sensor_msg_buffer.push((obs_dict, sensor_msg))
+
+        # calculate fps
+        self.fast_frame_count += 1
+        current_time = time.time()
+        elapsed_time = current_time - self.fast_prev_time
+        if elapsed_time >= 1.0:
+            frame_rate = self.fast_frame_count / elapsed_time
+            logger.debug(f"Fast env update rate: {frame_rate:.2f} FPS")
+            self.fast_prev_time = current_time
+            self.fast_frame_count = 0
 
     def check_sync(self):
         # Check and log timestamp differences across topics
@@ -293,7 +332,8 @@ class RealRobotEnvironment(Node):
     def get_obs(self,
                 obs_steps: int = 2,
                 temporal_downsample_ratio: int = 2,
-                return_sensor_msg: bool = False
+                return_sensor_msg: bool = False,
+                use_fast_buffer: bool = False
                 ) -> Dict[str, np.ndarray]:
         """
         Get observations with temporal downsampling support.
@@ -306,7 +346,11 @@ class RealRobotEnvironment(Node):
             A dictionary containing stacked observations
         """
         # Get last n*ratio observations to ensure we have enough samples after downsampling
-        last_n_sensor_msg_and_obs_list, _ = self.obs_and_sensor_msg_buffer.peek_last_n(
+        if use_fast_buffer:
+            last_n_sensor_msg_and_obs_list, _ = self.fast_obs_and_sensor_msg_buffer.peek_last_n(
+                obs_steps * temporal_downsample_ratio)
+        else:
+            last_n_sensor_msg_and_obs_list, _ = self.obs_and_sensor_msg_buffer.peek_last_n(
             obs_steps * temporal_downsample_ratio)  # newest to oldest
 
         result = dict()
@@ -331,6 +375,8 @@ class RealRobotEnvironment(Node):
         for key in downsampled_obs_list[0].keys():
             result[key] = stack_last_n_obs(
                 [obs[key] for obs in downsampled_obs_list], obs_steps)
+            if use_fast_buffer:
+                result[f"{key}_stack"] = result[key] # for compatibility
 
         # convert current time (ROS time) to python time
         current_timestamp = convert_ros_time_to_float(self.get_clock().now())
@@ -442,6 +488,32 @@ class RealRobotEnvironment(Node):
                     })
                 self.last_gripper_width_target[1] = right_gripper_width_target
 
+    def get_stiffness(self, tcp_target_6d_in_robot: np.ndarray, reference_tcp_target_6d_in_robot: np.ndarray, stiffness: float) -> np.ndarray:
+        """
+        Get stiffness vector
+        """
+        global_compliance_direction = tcp_target_6d_in_robot[:3] - reference_tcp_target_6d_in_robot[:3]
+        local_compliance_direction = (np.linalg.inv(pose_6d_to_4x4matrix(reference_tcp_target_6d_in_robot)[:3, :3]) @ global_compliance_direction[:, None])[:, 0]
+        
+        if np.linalg.norm(local_compliance_direction) < 0.001:
+            local_compliance_direction = np.array([1.0, 0.0, 0.0])
+        
+        local_compliance_direction = local_compliance_direction / np.linalg.norm(local_compliance_direction)
+        X = local_compliance_direction
+        Y = np.cross(X, np.array([0.0, 0.0, 1.0]))
+        Y = Y / np.linalg.norm(Y)
+        Z = np.cross(X, Y)
+
+        M = np.diag(
+            [stiffness, self.k_max_trans, self.k_max_trans]
+        )
+        S = np.array([X, Y, Z]).T
+        stiffness_matrix = S @ M @ S.T
+        stiffness_vector = stiffness_matrix.diagonal()
+        stiffness_vector_rot = np.array([self.k_max_rot, self.k_max_rot, self.k_max_rot])
+        stiffness_vector = np.concatenate([stiffness_vector, stiffness_vector_rot])
+        return stiffness_vector
+
     def execute_action(self, action: np.ndarray, action_type: ActionType, use_relative_action: bool = False) -> None:
         """
         Send action (in robot coordinate system) to robot
@@ -543,3 +615,73 @@ def env_process_worker(transforms, env_params, command_queue, response_queue, st
             rclpy.shutdown()
         except:
             pass
+
+
+class MultiProcessRealRobotEnvironment:
+    """Multi-process wrapper for RealRobotEnvironment"""
+    
+    def __init__(self, transforms, env_params):
+        # Environment attributes for compatibility
+        self.max_gripper_width = env_params.get('max_gripper_width', 0.05)
+        self.min_gripper_width = env_params.get('min_gripper_width', 0.0)
+        self.use_6d_rotation = env_params.data_processing_params.get('use_6d_rotation', True)
+
+        # Create multiprocessing primitives
+        self.command_queue = Queue()
+        self.response_queue = Queue()
+        self.stop_event = Event()
+        
+        # Start the environment process
+        self.process = Process(
+            target=env_process_worker,
+            args=(transforms, env_params, self.command_queue, self.response_queue, self.stop_event)
+        )
+        self.process.start()
+        
+        # Wait for process to initialize
+        time.sleep(2)
+        logger.info("MultiProcessRealRobotEnvironment initialized")
+    
+    def _call_method(self, method_name, *args, **kwargs):
+        """Call a method on the environment in the separate process"""
+        self.command_queue.put((method_name, args, kwargs))
+        
+        try:
+            status, result = self.response_queue.get(timeout=30.0)  # 30 second timeout
+            if status == 'success':
+                return result
+            else:
+                raise RuntimeError(f"Environment method {method_name} failed: {result}")
+        except queue.Empty:
+            raise RuntimeError(f"Timeout waiting for response from environment method {method_name}")
+    
+    def get_obs(self, *args, **kwargs):
+        """Get observations from the environment"""
+        return self._call_method('get_obs', *args, **kwargs)
+    
+    def execute_action(self, *args, **kwargs):
+        """Execute an action on the environment"""
+        return self._call_method('execute_action', *args, **kwargs)
+    
+    def reset(self):
+        """Reset the environment"""
+        return self._call_method('reset')
+    
+    def send_gripper_command_direct(self, *args, **kwargs):
+        """Send gripper command directly"""
+        return self._call_method('send_gripper_command_direct', *args, **kwargs)
+    
+    def send_command(self, *args, **kwargs):
+        """Send command to robot server"""
+        return self._call_method('send_command', *args, **kwargs)
+    
+    def destroy(self):
+        """Clean shutdown of the environment process"""
+        if hasattr(self, 'process') and self.process.is_alive():
+            self.stop_event.set()
+            self.process.join(timeout=5.0)
+            if self.process.is_alive():
+                logger.warning("Force terminating environment process")
+                self.process.terminate()
+                self.process.join()
+        logger.info("MultiProcessRealRobotEnvironment destroyed")
