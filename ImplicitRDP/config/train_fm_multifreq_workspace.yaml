@@ -92,6 +92,9 @@ policy:
   # Distillation
   use_distillation: False
   cd_num_scales: 40
+  # Bias CD training toward the noisy end, matching Stage 1 FM time sampling.
+  cd_beta_a: 1.5
+  cd_beta_b: 1.0
 
   # Inference head selection ("10hz" or "50hz")
   inference_head: "50hz"

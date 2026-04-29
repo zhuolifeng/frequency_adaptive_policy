@@ -64,6 +64,8 @@ class FMMultiFreqPolicy(BaseImagePolicy):
         # Distillation control
         use_distillation: bool = False,
         cd_num_scales: int = 40,
+        cd_beta_a: Optional[float] = None,
+        cd_beta_b: Optional[float] = None,
         # Inference head selection ("10hz" or "50hz")
         inference_head: str = "10hz",
         # Training stage
@@ -135,6 +137,9 @@ class FMMultiFreqPolicy(BaseImagePolicy):
         # ---- Distillation ----
         self.use_distillation = use_distillation
         self.cd_num_scales = cd_num_scales
+        self.cd_beta_a = beta_a if cd_beta_a is None else cd_beta_a
+        self.cd_beta_b = beta_b if cd_beta_b is None else cd_beta_b
+        assert self.cd_num_scales >= 2, "cd_num_scales must be >= 2"
         self.frozen_teacher = None   # set by workspace at stage transition
         self.ema_model_ref = None    # set by workspace at stage transition
 
@@ -162,7 +167,9 @@ class FMMultiFreqPolicy(BaseImagePolicy):
             f"FMMultiFreqPolicy initialized "
             f"(horizon_10hz={horizon_10hz}, horizon_50hz={horizon_50hz}, "
             f"use_distillation={use_distillation}, stage={training_stage}, "
-            f"inference_head={inference_head})"
+            f"inference_head={inference_head}, cd_num_scales={cd_num_scales}, "
+            f"cd_beta=({self.cd_beta_a}, {self.cd_beta_b}), "
+            f"cd_teacher_solver=heun)"
         )
 
     # ------------------------------------------------------------------
@@ -621,9 +628,14 @@ class FMMultiFreqPolicy(BaseImagePolicy):
 
         noise = torch.randn(nactions_50.shape, device=nactions_50.device)
 
-        # Sample adjacent time pair (t_n, t_{n+1}), t_n > t_{n+1}
+        # Sample adjacent time pair (t_n, t_{n+1}), t_n > t_{n+1}.
+        # Beta sampling reuses the stage-1 noisy-end bias for robot action CD.
         N = self.cd_num_scales
-        indices = torch.randint(0, N - 1, (B,), device=device)
+        noise_level = torch.distributions.Beta(
+            self.cd_beta_a, self.cd_beta_b
+        ).sample((B,)).to(device)
+        indices = ((1.0 - noise_level) * (N - 1)).long()
+        indices = indices.clamp(0, N - 2)
         t_n = 1.0 - indices.float() / N         # closer to noise
         t_n1 = 1.0 - (indices + 1).float() / N  # closer to data
         t_n_exp = t_n.view(B, 1, 1)
@@ -634,14 +646,21 @@ class FMMultiFreqPolicy(BaseImagePolicy):
         timesteps_n = (t_n * 1000).long()
         timesteps_n1 = (t_n1 * 1000).long()
 
-        # Teacher: one ODE step (frozen, distill=0)
+        # Teacher ODE step (frozen, distill=0). Heun improves the CD target
+        # while leaving distilled inference on the cheap consistency sampler.
         with torch.no_grad():
             v_teacher = self.frozen_teacher(
                 x_tn, timesteps_n, cond=obs_tokens, temporal_cond=temporal_cond_50hz,
                 freq_mode="50hz", distill_mode=0,
             )
             dt = (t_n1 - t_n).view(B, 1, 1)  # negative
-            x_tn1 = x_tn + dt * v_teacher
+            x_euler = x_tn + dt * v_teacher
+            v_teacher_next = self.frozen_teacher(
+                x_euler, timesteps_n1, cond=obs_tokens,
+                temporal_cond=temporal_cond_50hz,
+                freq_mode="50hz", distill_mode=0,
+            )
+            x_tn1 = x_tn + 0.5 * dt * (v_teacher + v_teacher_next)
 
         # Student: consistency function (model, distill=1, has gradient)
         v_student = self.model(

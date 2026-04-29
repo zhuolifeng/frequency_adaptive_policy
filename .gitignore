@@ -145,3 +145,5 @@ implicitrdp_venv/
 .vscode/
 .cursor/
 .idea/
+
+consistency_models/
