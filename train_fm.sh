@@ -2,14 +2,14 @@
 
 #--------------------------------
 # Config
-GPU_ID=0,1,2,3
+GPU_ID=4,5,6,7
 
 TASK="dual_switch"
-DATASET_VERSION="v4"
+DATASET_VERSION="v6"
 ROUND=1
 DATASET_TAG="${TASK}_${DATASET_VERSION}_round_${ROUND}"
 DATASET_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${DATASET_TAG}_zarr"
-TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps"
+TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_50hz"
 
 TRAINING_DEBUG=False
 POLICY_LR=1.0e-4
@@ -20,7 +20,7 @@ LOGGING_MODE="online"
 echo "Training Flow Matching Transformer Policy..."
 POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_fm_transformer_round_${ROUND}
 CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
-    --config-name=train_fm_workspace \
+    --config-name=train_fm_50hz_workspace \
     task=${TASK_CONFIG} \
     task.dataset_path=${DATASET_PATH} \
     task.name=${POLICY_TASK_NAME} \

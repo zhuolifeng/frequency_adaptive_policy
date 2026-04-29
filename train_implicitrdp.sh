@@ -2,7 +2,7 @@
 
 #--------------------------------
 # Config
-GPU_ID=0,1,2,3,4,5,6,7
+GPU_ID=0,1,2,3
 
 TASK="dual_switch"
 DATASET_VERSION="v6"
@@ -11,7 +11,7 @@ ROUND=1
 # ACTION_TYPE="right_arm_6DOF_wrench" # FP
 ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness" # VRR
 DATASET_TAG="${TASK}_${DATASET_VERSION}_round_${ROUND}"
-DATASET_PATH="/${DATASET_TAG}_zarr"
+DATASET_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${DATASET_TAG}_zarr"
 TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_50hz"
 
 USE_AMP_FOR_POLICY=False
@@ -28,8 +28,8 @@ echo "Stage 0: post-processing data..."
 # Stage 1: Train Policy
 echo "Stage 1: training Policy..."
 POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_policy_bigger_acp_round_${ROUND}
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
-    --config-name=train_reactive_diffusion_transformer_real_image_workspace \
+CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port 29501 train.py \
+    --config-name=train_reactive_diffusion_transformer_real_image_50hz_workspace \
     task=${TASK_CONFIG} \
     task.dataset_path=${DATASET_PATH} \
     task.name=${POLICY_TASK_NAME} \

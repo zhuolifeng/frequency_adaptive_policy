@@ -326,7 +326,7 @@ class TrainFlowMatchingTransformerImageWorkspace(BaseWorkspace):
                             batch = dict_apply(sampling_batch, lambda x: x.to(device, non_blocking=True))
                             obs_dict = batch['obs']
                             extended_obs_dict = batch['extended_obs']
-                            gt_action = batch['action']
+                            gt_action = batch['action_stack']
 
                             if 'flow_matching' in cfg.name or 'reactive' in cfg.name:
                                 dataset_obs_temporal_downsample_ratio = cfg.task.dataset.obs_temporal_downsample_ratio

@@ -19,7 +19,6 @@ import copy
 import random
 import tqdm
 import numpy as np
-import pickle
 
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
@@ -103,15 +102,28 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
         else:
             amp_dtype = None
         
-        accelerator = Accelerator(log_with='wandb')
+        accelerator = Accelerator(log_with='tensorboard', project_dir=self.output_dir)
         cuda_count = accelerator.num_processes
 
-        wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
-        wandb_cfg.pop('project')
+        # Flatten nested config for TensorBoard (only supports int/float/str/bool)
+        def flatten_dict(d, parent_key='', sep='/'):
+            items = {}
+            for k, v in d.items():
+                new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                if isinstance(v, dict):
+                    items.update(flatten_dict(v, new_key, sep=sep))
+                elif isinstance(v, (list, tuple)):
+                    items[new_key] = str(v)
+                elif isinstance(v, (int, float, str, bool)) or v is None:
+                    items[new_key] = str(v) if v is None else v
+                else:
+                    items[new_key] = str(v)
+            return items
+
+        flat_config = flatten_dict(OmegaConf.to_container(cfg, resolve=True))
         accelerator.init_trackers(
             project_name=cfg.logging.project,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            init_kwargs={"wandb": wandb_cfg}
+            config=flat_config,
         )
 
         # resume training
@@ -164,21 +176,16 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **val_dataloader_cfg)
 
-        # compute normalizer on the main process and save to disk
-        normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
-        if accelerator.is_main_process:
-            normalizer = dataset.get_normalizer()
-            if cfg.training.pretrained_ckpt_path is not None:
-                normalizer_state_dict = normalizer.state_dict()
-                current_normalizer_state_dict = self.model.normalizer.state_dict()
-                for key in current_normalizer_state_dict.keys():
-                    normalizer_state_dict[key] = current_normalizer_state_dict[key]
-                normalizer.load_state_dict(normalizer_state_dict)
-            pickle.dump(normalizer, open(normalizer_path, 'wb'))
-
-        # load normalizer on all processes
-        accelerator.wait_for_everyone()
-        normalizer = pickle.load(open(normalizer_path, 'rb'))
+        # compute normalizer on all processes independently
+        # (deterministic given the same dataset, avoids multi-GPU file sync issues
+        # where ${now:...} in hydra output_dir can differ across ranks)
+        normalizer = dataset.get_normalizer()
+        if cfg.training.pretrained_ckpt_path is not None:
+            normalizer_state_dict = normalizer.state_dict()
+            current_normalizer_state_dict = self.model.normalizer.state_dict()
+            for key in current_normalizer_state_dict.keys():
+                normalizer_state_dict[key] = current_normalizer_state_dict[key]
+            normalizer.load_state_dict(normalizer_state_dict)
 
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -386,7 +393,7 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                             batch = dict_apply(sampling_batch, lambda x: x.to(device, non_blocking=True))
                             obs_dict = batch['obs']
                             extended_obs_dict = batch['extended_obs']
-                            gt_action = batch['action']
+                            gt_action = batch['action_stack']
 
                             if 'reactive' in cfg.name:
                                 dataset_obs_temporal_downsample_ratio = cfg.task.dataset.obs_temporal_downsample_ratio
