@@ -1,31 +1,50 @@
 #!/bin/bash
 
-TASK="dual_switch"
-DATASET_VERSION="v4.2"
-ROUND="1"
+TASK="${TASK:-dual_switch}"
+DATASET_VERSION="${DATASET_VERSION:-v4.2}"
+ROUND="${ROUND:-1}"
 
-CONFIG_NAME="train_fm_multifreq_workspace"
+# POLICY_TYPE options:
+#   fm          -> train_fm_multifreq_workspace
+#   consistency -> train_fm_multifreq_consistency_workspace
+#   ctm         -> train_fm_multifreq_ctm_workspace
+POLICY_TYPE="${POLICY_TYPE:-fm}"
+if [ -z "${CONFIG_NAME}" ]; then
+    case "${POLICY_TYPE}" in
+        fm)
+            CONFIG_NAME="train_fm_multifreq_workspace"
+            ;;
+        consistency)
+            CONFIG_NAME="train_fm_multifreq_consistency_workspace"
+            ;;
+        ctm)
+            CONFIG_NAME="train_fm_multifreq_ctm_workspace"
+            ;;
+        *)
+            echo "Unsupported POLICY_TYPE=${POLICY_TYPE}. Use fm, consistency, or ctm."
+            exit 1
+            ;;
+    esac
+fi
 
-# Checkpoint path (update to actual path)
-CKPT_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/frequency_adaptive_policy/data/outputs/2026.04.19/14.11.21_train_fm_multifreq_workspace_dual_switch_v4_fm_multifreq/checkpoints/latest.ckpt"
+# Checkpoint path. Override with CKPT_PATH=/path/to/checkpoint.ckpt.
+CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/frequency_adaptive_policy/data/outputs/2026.04.19/14.11.21_train_fm_multifreq_workspace_dual_switch_v4_fm_multifreq/checkpoints/latest.ckpt}"
 
-# Dataset path
-DATASET_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr"
+# Dataset path. Override with DATASET_PATH=/path/to/zarr.
+DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
-# GPU device
-GPU_DEVICE="cuda:0"
+GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
 
-# Video settings
-VIDEO_FPS=1
-NUM_INFERENCE_STEPS=1
-USE_DISTILLATION=True
+VIDEO_FPS="${VIDEO_FPS:-1}"
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-1}"
+USE_DISTILLATION="${USE_DISTILLATION:-True}"
 
-# Output directory
-OUTPUT_DIR="evaluations_fm_multifreq_stage2_1step_standard"
+OUTPUT_DIR="${OUTPUT_DIR:-evaluations_fm_multifreq}"
 
 echo "=========================================="
 echo "FM MultiFreq Policy Evaluation"
 echo "=========================================="
+echo "Policy type:${POLICY_TYPE}"
 echo "Config:     ${CONFIG_NAME}"
 echo "Checkpoint: ${CKPT_PATH}"
 echo "Dataset:    ${DATASET_PATH}"
@@ -38,17 +57,28 @@ echo ""
 
 export CKPT_PATH="${CKPT_PATH}"
 export OUTPUT_DIR="${OUTPUT_DIR}"
-python eval_fm_multifreq.py \
-    --config-name ${CONFIG_NAME} \
-    task=real_${TASK}_image_wrench_offline_10fps_acp \
-    task.dataset_path=${DATASET_PATH} \
-    +use_full_dataset=True \
-    +num_inference_steps=${NUM_INFERENCE_STEPS} \
-    +use_distillation=${USE_DISTILLATION} \
-    +video_fps=${VIDEO_FPS} \
-    +device=${GPU_DEVICE} \
-    task.dataset.val_ratio=0.0 \
-    'policy.obs_encoder.transforms=[{type: CenterCrop}]'
+
+ARGS=(
+    --config-name "${CONFIG_NAME}"
+    "task=real_${TASK}_image_wrench_offline_10fps_acp"
+    "task.dataset_path=${DATASET_PATH}"
+    "+use_full_dataset=True"
+    "+num_inference_steps=${NUM_INFERENCE_STEPS}"
+    "+video_fps=${VIDEO_FPS}"
+    "+device=${GPU_DEVICE}"
+    "task.dataset.val_ratio=0.0"
+    "policy.obs_encoder.transforms=[{type: CenterCrop}]"
+)
+
+if [ "${CONFIG_NAME}" = "train_fm_multifreq_workspace" ]; then
+    ARGS+=("+use_distillation=${USE_DISTILLATION}")
+fi
+
+if [ "${CONFIG_NAME}" = "train_fm_multifreq_ctm_workspace" ]; then
+    ARGS+=("+training_stage=2")
+fi
+
+python eval_fm_multifreq.py "${ARGS[@]}"
 
 echo ""
 echo "=========================================="

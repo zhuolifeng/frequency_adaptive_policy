@@ -82,7 +82,6 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
             horizon_50hz=horizon_50hz,
             action_start_10hz=action_start_10hz,
             action_start_50hz=action_start_50hz,
-            use_distillation=True,
             cd_num_scales=ctm_num_scales,
             cd_beta_a=beta_a if ctm_beta_a is None else ctm_beta_a,
             cd_beta_b=beta_b if ctm_beta_b is None else ctm_beta_b,

@@ -13,6 +13,8 @@ import json
 
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
+from ImplicitRDP.policy.fm_multifreq_consistency_policy import FMMultiFreqConsistencyPolicy
+from ImplicitRDP.policy.fm_multifreq_ctm_policy import FMMultiFreqCTMPolicy
 from ImplicitRDP.dataset.base_dataset import BaseImageDataset
 from ImplicitRDP.common.pytorch_util import dict_apply
 
@@ -159,8 +161,24 @@ def main(cfg):
     workspace.load_payload(payload, exclude_keys=["optimizer", "scaler"], strict=False)
 
     policy = workspace.ema_model if cfg.training.use_ema else workspace.model
-    if not isinstance(policy, FMMultiFreqPolicy):
-        raise ValueError(f"Expected FMMultiFreqPolicy, got {type(policy)}")
+    supported_policy_types = (
+        FMMultiFreqPolicy,
+        FMMultiFreqConsistencyPolicy,
+        FMMultiFreqCTMPolicy,
+    )
+    if not isinstance(policy, supported_policy_types):
+        raise ValueError(
+            "Expected FMMultiFreqPolicy, FMMultiFreqConsistencyPolicy, "
+            f"or FMMultiFreqCTMPolicy, got {type(policy)}"
+        )
+
+    configured_training_stage = cfg.get('training_stage', None)
+    if configured_training_stage is not None and hasattr(policy, 'set_training_stage'):
+        policy.set_training_stage(int(configured_training_stage))
+        logger.info(f"Override policy.training_stage -> {int(configured_training_stage)}")
+    elif isinstance(policy, FMMultiFreqCTMPolicy):
+        policy.set_training_stage(2)
+        logger.info("Using FMMultiFreqCTMPolicy in Stage 2 inference mode")
 
     configured_inference_steps = cfg.get('num_inference_steps', None)
     if configured_inference_steps is not None and hasattr(policy, 'num_inference_steps'):

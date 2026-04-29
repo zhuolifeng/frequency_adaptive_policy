@@ -81,6 +81,68 @@ class TrainFMMultiFreqConsistencyWorkspace(BaseWorkspace):
             f"ct_beta=({cfg.policy.ct_beta_a}, {cfg.policy.ct_beta_b})"
         )
 
+    @staticmethod
+    def _mean_first_dims_mse(pred, target, n_dims=6):
+        dims = min(n_dims, pred.shape[-1], target.shape[-1])
+        return torch.mean((pred[..., :dims] - target[..., :dims]) ** 2)
+
+    def _compute_val_diagnostics(
+        self,
+        policy: FMMultiFreqConsistencyPolicy,
+        batch,
+    ):
+        diagnostics = {}
+
+        result = policy.predict_action(
+            obs_dict=batch["obs"],
+            extended_obs_dict=batch.get("extended_obs", None),
+            num_inference_steps=1,
+        )
+        start_50 = policy.action_start_50hz
+        end_50 = policy.horizon_50hz
+        gt_action_50 = batch["action_stack"][:, start_50:end_50]
+        pred_action_50 = result["action_50hz"]
+        min_len = min(gt_action_50.shape[1], pred_action_50.shape[1])
+        diagnostics["sample_mse_50hz_1step"] = self._mean_first_dims_mse(
+            pred_action_50[:, :min_len],
+            gt_action_50[:, :min_len],
+        )
+
+        nobs = policy.normalizer.normalize(batch["obs"])
+        nactions_50 = policy.normalizer["action_stack"].normalize(
+            batch["action_stack"]
+        )
+        B = nactions_50.shape[0]
+        this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
+        obs_tokens = policy.obs_encoder(this_nobs)
+        if len(obs_tokens.shape) == 2:
+            obs_tokens = obs_tokens.reshape(B, -1, *obs_tokens.shape[1:])
+
+        temporal_cond_50hz = None
+        if policy.rnn_highfreq is not None:
+            temporal_cond_50hz = policy.get_temporal_cond(
+                batch["extended_obs"], head="50hz"
+            )
+
+        noise = torch.randn_like(nactions_50)
+        for t_name, t_value in (("1.0", 1.0), ("0.5", 0.5), ("0.1", 0.1), ("0.025", 0.025)):
+            t = torch.full((B,), t_value, device=nactions_50.device)
+            t_exp = t.view(B, 1, 1)
+            x_t = t_exp * noise + (1.0 - t_exp) * nactions_50
+            f_pred = policy._consistency_function(
+                policy.model,
+                x_t,
+                t,
+                obs_tokens,
+                temporal_cond_50hz,
+                "50hz",
+            )
+            diagnostics[f"f_to_x0_mse_50hz_t_{t_name}"] = torch.mean(
+                (f_pred - nactions_50) ** 2
+            )
+
+        return diagnostics
+
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
@@ -307,6 +369,13 @@ class TrainFMMultiFreqConsistencyWorkspace(BaseWorkspace):
                 ):
                     with torch.no_grad():
                         val_losses = []
+                        val_diag = {
+                            "sample_mse_50hz_1step": [],
+                            "f_to_x0_mse_50hz_t_1.0": [],
+                            "f_to_x0_mse_50hz_t_0.5": [],
+                            "f_to_x0_mse_50hz_t_0.1": [],
+                            "f_to_x0_mse_50hz_t_0.025": [],
+                        }
                         with tqdm.tqdm(
                             val_dataloader,
                             desc=f"Validation epoch {self.epoch}",
@@ -320,7 +389,12 @@ class TrainFMMultiFreqConsistencyWorkspace(BaseWorkspace):
                                 )
                                 with autocast(enabled=use_amp, dtype=amp_dtype):
                                     raw_loss, _ = policy.compute_loss(batch)
+                                    diag_dict = self._compute_val_diagnostics(
+                                        policy, batch
+                                    )
                                 val_losses.append(raw_loss.item())
+                                for key, value in diag_dict.items():
+                                    val_diag[key].append(value.item())
                                 if (
                                     cfg.training.max_val_steps is not None
                                     and batch_idx >= cfg.training.max_val_steps - 1
@@ -335,6 +409,14 @@ class TrainFMMultiFreqConsistencyWorkspace(BaseWorkspace):
                                 ).item()
                             else:
                                 step_log["val_loss"] = float("nan")
+                        for key, values in val_diag.items():
+                            if len(values) > 0:
+                                values_t = torch.tensor(values)
+                                valid_mask = ~torch.isnan(values_t)
+                                if valid_mask.any():
+                                    step_log[f"val_{key}"] = torch.mean(
+                                        values_t[valid_mask]
+                                    ).item()
 
                 if (
                     (self.epoch % cfg.training.checkpoint_every) == 0
