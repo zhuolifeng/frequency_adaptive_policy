@@ -64,6 +64,7 @@ policy:
     n_cond_layers: 0
     horizon_10hz: 16
     horizon_50hz: 80
+    use_freq_token: False
 
   n_emb: ${n_emb}
   horizon: ${horizon}

@@ -2,9 +2,10 @@
 Multi-frequency Transformer for CTM-style flow-matching distillation.
 
 This is a complete backbone, separate from TransformerForDiffusionMultiFreq.
-It always uses an explicit stop-time condition token:
+It always uses an explicit stop-time condition token and can optionally use a
+frequency condition token:
 
-    [time_emb | stop_time_emb | freq_emb | obs_tokens]
+    [time_emb | stop_time_emb | optional freq_emb | obs_tokens]
 
 The network predicts a rectified-flow velocity. Policies convert that velocity
 into a CTM transition with:
@@ -48,6 +49,7 @@ class TransformerForCTMMultiFreq(ModuleAttrMixin):
         freq_ratio: int = 5,
         action_offset_10hz: int = 8,
         temporal_offset_10hz: int = 4,
+        use_freq_token: bool = True,
     ) -> None:
         super().__init__()
 
@@ -67,7 +69,8 @@ class TransformerForCTMMultiFreq(ModuleAttrMixin):
         self.pos_emb = nn.Parameter(torch.zeros(1, pos_emb_len, n_emb))
 
         self.time_emb = SinusoidalPosEmb(n_emb)
-        self.freq_emb = nn.Embedding(2, n_emb)
+        self.use_freq_token = use_freq_token
+        self.freq_emb = nn.Embedding(2, n_emb) if use_freq_token else None
 
         self.cond_obs_emb = None
         if obs_as_cond:
@@ -243,15 +246,18 @@ class TransformerForCTMMultiFreq(ModuleAttrMixin):
         timesteps = self._expand_timesteps(timestep, B, device)
         time_emb = self.time_emb(timesteps).unsqueeze(1)
 
-        freq_id = torch.tensor([0 if freq_mode == "10hz" else 1], device=device)
-        freq_token = self.freq_emb(freq_id).unsqueeze(0).expand(B, -1, -1)
-
         if stop_timestep is None:
             stop_timesteps = torch.zeros_like(timesteps)
         else:
             stop_timesteps = self._expand_timesteps(stop_timestep, B, device)
         stop_time_emb = self.time_emb(stop_timesteps).unsqueeze(1)
-        cond_emb = torch.cat([time_emb, stop_time_emb, freq_token], dim=1)
+
+        cond_tokens = [time_emb, stop_time_emb]
+        if self.use_freq_token:
+            freq_id = torch.tensor([0 if freq_mode == "10hz" else 1], device=device)
+            freq_token = self.freq_emb(freq_id).unsqueeze(0).expand(B, -1, -1)
+            cond_tokens.append(freq_token)
+        cond_emb = torch.cat(cond_tokens, dim=1)
         if self.cond_obs_emb is not None and cond is not None:
             cond_obs_emb = self.cond_obs_emb(cond)
             cond_emb = torch.cat([cond_emb, cond_obs_emb], dim=1)
