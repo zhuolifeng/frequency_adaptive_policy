@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.nn.functional as F
 from torch.cuda.amp import autocast
+from torch.func import jvp
 
 from loguru import logger
 
@@ -144,7 +145,7 @@ class FMMultiFreqIMFPolicy(FMMultiFreqPolicy):
         return loss / adp_wt.detach()
 
     # ------------------------------------------------------------------
-    # JVP via backward-mode AD (avoids forward AD kernel limitations)
+    # Exact JVP via forward-mode AD
     # ------------------------------------------------------------------
 
     def _compute_jvp(
@@ -157,22 +158,11 @@ class FMMultiFreqIMFPolicy(FMMultiFreqPolicy):
         freq_mode: str,
         v_tangent: torch.Tensor,
     ):
-        """Compute du/dz·v + du/dt via backward-mode AD.
+        """Compute du/dz·v + du/dt with exact forward-mode AD.
 
         The MeanFlow equation needs: V = u + h * (du/dz·v + du/dt)
         where the directional derivative du/dz·v + du/dt is the JVP with
         tangents (v, 1, 0) for inputs (z_t, t, r).
-
-        We compute this using backward AD by:
-        1. Make z_t and t differentiable inputs (require_grad)
-        2. Forward pass to get u
-        3. For each output element u_i, grad w.r.t. (z_t, t) gives one row
-           of the Jacobian. To get the full JVP we'd need B*T*D backward
-           passes — too expensive.
-
-        Instead, we use the **finite difference** approximation:
-            (du/dz·v + du/dt) ≈ [u(z+εv, t+ε, r) - u(z, t, r)] / ε
-        This is simple, numerically stable, and works with any kernel.
 
         Args:
             z_t: (B, T, D) noisy actions
@@ -181,36 +171,31 @@ class FMMultiFreqIMFPolicy(FMMultiFreqPolicy):
             obs_tokens: (B, N, n_emb) observation tokens
             temporal_cond: (B, T, n_emb) or None
             freq_mode: "10hz" or "50hz"
-            v_tangent: (B, T, D) tangent vector for z_t (detached v prediction)
+            v_tangent: (B, T, D) tangent vector for z_t
 
         Returns:
             u: (B, T, D) average velocity prediction (from base point)
-            du_combined: (B, T, D) ≈ du/dz·v + du/dt
+            v: (B, T, D) auxiliary instantaneous velocity prediction
+            du_combined: (B, T, D) exact du/dz·v + du/dt
         """
-        eps = 1e-4
-
         def u_fn(z, t_val, r_val):
             h_val = t_val - r_val
-            t_steps = (t_val * 1000).long()
-            h_steps = (h_val * 1000).long()
-            u_out, _ = self.model(
-                z, t_steps, h_steps,
+            u_out, v_out = self.model(
+                z, t_val, h_val,
                 cond=obs_tokens,
                 temporal_cond=temporal_cond,
                 freq_mode=freq_mode,
             )
-            return u_out
+            return u_out, v_out
 
-        with torch.no_grad():
-            u_base = u_fn(z_t, t, r)
-            u_perturbed = u_fn(
-                z_t + eps * v_tangent,
-                t + eps,
-                r,
-            )
-            du_combined = (u_perturbed - u_base) / eps
+        u, du_combined, v = jvp(
+            u_fn,
+            (z_t, t, r),
+            (v_tangent, torch.ones_like(t), torch.zeros_like(r)),
+            has_aux=True,
+        )
 
-        return u_base, du_combined
+        return u, v, du_combined
 
     # ------------------------------------------------------------------
     # iMF loss for one frequency
@@ -247,32 +232,22 @@ class FMMultiFreqIMFPolicy(FMMultiFreqPolicy):
         z_t = t_exp * noise + (1.0 - t_exp) * x0
         v_true = noise - x0  # true instantaneous velocity
 
-        # 3. Regular forward pass → get (u, v) predictions
+        # 3. Exact JVP forward pass → get u, v, and du/dz·v_true + du/dt
         h = t - r
-        t_steps = (t * 1000).long()
-        h_steps = (h * 1000).long()
-        u_pred, v_pred = self.model(
-            z_t, t_steps, h_steps,
-            cond=obs_tokens,
-            temporal_cond=temporal_cond,
-            freq_mode=freq_mode,
-        )
-
-        # 4. JVP to compute du/dt (using predicted v as tangent, detached)
-        u_jvp, du_combined = self._compute_jvp(
+        u_pred, v_pred, du_combined = self._compute_jvp(
             z_t, t, r,
             obs_tokens, temporal_cond, freq_mode,
-            v_tangent=v_pred.detach(),
+            v_tangent=v_true.detach(),
         )
 
-        # 5. Compound function: V = u + h * du/dt
+        # 4. Compound function: V = u + h * du/dt
         h_exp = h.view(B, 1, 1)
         V = u_pred + h_exp * du_combined.detach()
 
-        # 6. Targets (stop gradient)
+        # 5. Targets (stop gradient)
         v_target = v_true.detach()
 
-        # 7. Per-sample losses with adaptive weighting
+        # 6. Per-sample losses with adaptive weighting
         loss_u = ((V - v_target) ** 2).sum(dim=(1, 2))
         loss_u = self._adp_wt_fn(loss_u, self.norm_eps, self.norm_p)
 
@@ -372,8 +347,12 @@ class FMMultiFreqIMFPolicy(FMMultiFreqPolicy):
             t = t_schedule[i]
             h = t - t_schedule[i + 1]
 
-            t_tensor = torch.full((B,), t.item() * 1000, device=x.device).long()
-            h_tensor = torch.full((B,), h.item() * 1000, device=x.device).long()
+            t_tensor = torch.full(
+                (B,), t.item(), dtype=x.dtype, device=x.device
+            )
+            h_tensor = torch.full(
+                (B,), h.item(), dtype=x.dtype, device=x.device
+            )
 
             u, _ = self.model(
                 x,

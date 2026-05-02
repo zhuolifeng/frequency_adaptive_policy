@@ -17,20 +17,31 @@ class CustomizedTransformerDecoderLayer(nn.TransformerDecoderLayer):
                     activation=activation, layer_norm_eps=layer_norm_eps, batch_first=batch_first,
                     norm_first=norm_first, bias=bias, device=device, dtype=dtype)
 
+    @staticmethod
+    def _has_forward_ad_tensor(*tensors: Tensor) -> bool:
+        return any(
+            torch.autograd.forward_ad.unpack_dual(tensor).tangent is not None
+            for tensor in tensors
+        )
+
+    def _sa_block(self, x: Tensor, attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor], is_causal: bool = False) -> Tensor:
+        need_weights = self._has_forward_ad_tensor(x)
+        x, _ = self.self_attn(x, x, x,
+                              attn_mask=attn_mask,
+                              key_padding_mask=key_padding_mask,
+                              is_causal=is_causal,
+                              need_weights=need_weights)
+        return self.dropout1(x)
+
     def _mha_block(self, x: Tensor, mem: Tensor, attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor], is_causal: bool = False) -> Tensor:
+        need_weights = VISUALIZE_ATTENTION or self._has_forward_ad_tensor(x, mem)
+        x, weights = self.multihead_attn(x, mem, mem,
+                            attn_mask=attn_mask,
+                            key_padding_mask=key_padding_mask,
+                            is_causal=is_causal,
+                            need_weights=need_weights)
         if VISUALIZE_ATTENTION:
-            x, weights = self.multihead_attn(x, mem, mem,
-                                attn_mask=attn_mask,
-                                key_padding_mask=key_padding_mask,
-                                is_causal=is_causal,
-                                need_weights=True)
             self.last_attn_weights = weights
-        else:
-            x, weights = self.multihead_attn(x, mem, mem,
-                                attn_mask=attn_mask,
-                                key_padding_mask=key_padding_mask,
-                                is_causal=is_causal,
-                                need_weights=False)
         return self.dropout2(x)
 
     def forward(self, tgt: Tensor,

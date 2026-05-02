@@ -263,7 +263,7 @@ class TransformerForIMFMultiFreq(ModuleAttrMixin):
     @staticmethod
     def _expand_timesteps(timestep, batch_size: int, device: torch.device):
         if not torch.is_tensor(timestep):
-            timestep = torch.tensor([timestep], dtype=torch.long, device=device)
+            timestep = torch.tensor([timestep], dtype=torch.float32, device=device)
         elif torch.is_tensor(timestep) and len(timestep.shape) == 0:
             timestep = timestep[None].to(device)
         else:
@@ -287,8 +287,8 @@ class TransformerForIMFMultiFreq(ModuleAttrMixin):
         """
         Args:
             sample: (B, T, input_dim) — noisy action tokens
-            timestep: (B,) or scalar — diffusion time t (scaled by 1000)
-            h_timestep: (B,) or scalar — time difference h = t - r (scaled by 1000)
+            timestep: (B,) or scalar — continuous diffusion time t in [0, 1]
+            h_timestep: (B,) or scalar — continuous time difference h = t - r
             cond: (B, N_obs, cond_dim) — obs tokens
             temporal_cond: (B, T, n_emb) — RNN-encoded force tokens
             freq_mode: "10hz" or "50hz"
