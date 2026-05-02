@@ -24,22 +24,72 @@ class CustomizedTransformerDecoderLayer(nn.TransformerDecoderLayer):
             for tensor in tensors
         )
 
+    def _mha_forward(
+        self,
+        mha: nn.MultiheadAttention,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attn_mask: Optional[Tensor],
+        key_padding_mask: Optional[Tensor],
+        is_causal: bool,
+        need_weights: bool,
+    ):
+        has_forward_ad = self._has_forward_ad_tensor(query, key, value)
+        if not has_forward_ad:
+            return mha(
+                query, key, value,
+                attn_mask=attn_mask,
+                key_padding_mask=key_padding_mask,
+                is_causal=is_causal,
+                need_weights=need_weights,
+            )
+
+        # PyTorch's native/SDPA MHA fast paths do not support forward AD.
+        # Disable the native MHA fast path and request weights to force the
+        # math path while torch.func.jvp is tracing dual tensors.
+        mha_backend = getattr(torch.backends, "mha", None)
+        can_toggle_fastpath = (
+            mha_backend is not None
+            and hasattr(mha_backend, "get_fastpath_enabled")
+            and hasattr(mha_backend, "set_fastpath_enabled")
+        )
+        old_fastpath = None
+        if can_toggle_fastpath:
+            old_fastpath = mha_backend.get_fastpath_enabled()
+            mha_backend.set_fastpath_enabled(False)
+        try:
+            return mha(
+                query, key, value,
+                attn_mask=attn_mask,
+                key_padding_mask=key_padding_mask,
+                is_causal=is_causal,
+                need_weights=True,
+            )
+        finally:
+            if can_toggle_fastpath:
+                mha_backend.set_fastpath_enabled(old_fastpath)
+
     def _sa_block(self, x: Tensor, attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor], is_causal: bool = False) -> Tensor:
-        need_weights = self._has_forward_ad_tensor(x)
-        x, _ = self.self_attn(x, x, x,
-                              attn_mask=attn_mask,
-                              key_padding_mask=key_padding_mask,
-                              is_causal=is_causal,
-                              need_weights=need_weights)
+        x, _ = self._mha_forward(
+            self.self_attn,
+            x, x, x,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
+            is_causal=is_causal,
+            need_weights=False,
+        )
         return self.dropout1(x)
 
     def _mha_block(self, x: Tensor, mem: Tensor, attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor], is_causal: bool = False) -> Tensor:
-        need_weights = VISUALIZE_ATTENTION or self._has_forward_ad_tensor(x, mem)
-        x, weights = self.multihead_attn(x, mem, mem,
-                            attn_mask=attn_mask,
-                            key_padding_mask=key_padding_mask,
-                            is_causal=is_causal,
-                            need_weights=need_weights)
+        x, weights = self._mha_forward(
+            self.multihead_attn,
+            x, mem, mem,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
+            is_causal=is_causal,
+            need_weights=VISUALIZE_ATTENTION,
+        )
         if VISUALIZE_ATTENTION:
             self.last_attn_weights = weights
         return self.dropout2(x)
