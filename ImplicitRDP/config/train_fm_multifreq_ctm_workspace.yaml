@@ -89,16 +89,23 @@ policy:
   action_start_50hz: 13
 
   # Stage-2 CTM distillation
-  ctm_num_scales: 40
+  ctm_num_scales: 120        # 40→120: denser grid covers more timesteps,
+                              # teacher Heun step size = 1/120 ≈ 0.0083,
+                              # reduces gap between training and inference timesteps
   ctm_beta_a: 1.5
   ctm_beta_b: 1.0
   ctm_loss_weight: 1.0
   dsm_loss_weight: 1.0
   ctm_chain_to_zero: True
   stop_time_sample_mode: mixed
-  stop_time_zero_prob: 0.5
+  stop_time_zero_prob: 0.8   # 0.5→0.8: stronger s=0 training, directly benefits
+                              # 1-step inference (G(noise, 1.0, 0.0) → clean)
   ctm_delta: 0.0
   ctm_freq: "50hz"
+
+  # 10hz FM velocity-matching preservation loss weight (prevents
+  # catastrophic forgetting of 10hz through the shared backbone)
+  fm_preserve_loss_weight: 1.0
 
   inference_head: "50hz"
   training_stage: 1
@@ -109,7 +116,10 @@ ema:
   inv_gamma: 1.0
   power: 0.75
   min_value: 0.0
-  max_value: 0.9999
+  max_value: 0.0             # Fix: match original consistency-policy (initial_ema_decay=0.0).
+                              # decay=0 means target ≡ student at every step:
+                              # ema = 0*ema + 1*student.  The training signal comes
+                              # entirely from the teacher ODE step, not from EMA lag.
 
 dataloader:
   batch_size: 64

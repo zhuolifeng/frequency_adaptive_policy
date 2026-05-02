@@ -1,23 +1,23 @@
 #!/bin/bash
 
 TASK="${TASK:-dual_switch}"
-DATASET_VERSION="${DATASET_VERSION:-v4.2}"
+DATASET_VERSION="${DATASET_VERSION:-v6.1}"
 ROUND="${ROUND:-1}"
 
 CONFIG_NAME="${CONFIG_NAME:-train_dp_multifreq_workspace}"
 
 # Checkpoint path. Override with CKPT_PATH=/path/to/checkpoint.ckpt.
-CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/frequency_adaptive_policy/data/outputs/latest_dp_multifreq/checkpoints/latest.ckpt}"
+CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.04.30/17.25.24_train_dp_multifreq_workspace_dual_switch_v6_dp_multifreq/checkpoints/latest.ckpt}"
 
 # Dataset path. Override with DATASET_PATH=/path/to/zarr.
 DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
-GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
+GPU_DEVICE="${GPU_DEVICE:-cuda:2}"
 VIDEO_FPS="${VIDEO_FPS:-1}"
-NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-5}"
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-2}"
 TRAINING_STAGE="${TRAINING_STAGE:-2}"
 USE_CTM_INFERENCE="${USE_CTM_INFERENCE:-True}"
-OUTPUT_DIR="${OUTPUT_DIR:-evaluations_dp_multifreq}"
+OUTPUT_DIR="${OUTPUT_DIR:-evaluations_dp_multifreq_2steps}"
 
 echo "=========================================="
 echo "DP MultiFreq Policy Evaluation"

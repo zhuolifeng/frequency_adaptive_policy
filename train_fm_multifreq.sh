@@ -2,10 +2,10 @@
 
 #--------------------------------
 # Config
-GPU_ID=0,1,2,3,4,5,6,7
+GPU_ID=0,1,2,3
 
 TASK="dual_switch"
-DATASET_VERSION="v4"
+DATASET_VERSION="v6"
 ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness"
 TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 
@@ -15,13 +15,13 @@ TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 USE_DISTILLATION=True
 
 # Training epochs
-STAGE1_EPOCHS=600    # FM velocity matching (10hz + 50hz)
+STAGE1_EPOCHS=900    # FM velocity matching (10hz + 50hz)
 STAGE2_EPOCHS=300       # CD distillation for 50hz (0 = disabled when USE_DISTILLATION=False)
 
 
 TOTAL_EPOCHS=$((STAGE1_EPOCHS + STAGE2_EPOCHS))
 
-DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_1_zarr"
+DATASET_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_1_zarr"
 
 USE_AMP_FOR_POLICY=False
 AMP_DTYPE_FOR_POLICY="bf16"
@@ -41,7 +41,7 @@ echo "  Dataset: ${DATASET_PATH}"
 echo "=========================================="
 
 POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_fm_multifreq
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
+CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port 29501 train.py \
     --config-name=train_fm_multifreq_workspace \
     task=${TASK_CONFIG} \
     task.dataset_path=${DATASET_PATH} \

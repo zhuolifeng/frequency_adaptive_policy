@@ -87,7 +87,7 @@ policy:
     n_head: 4
     n_emb: ${n_emb}
     p_drop_emb: 0.0
-    p_drop_attn: 0.1
+    p_drop_attn: 0.2              # Higher dropout for student (consistency-policy uses 0.2)
     time_as_cond: True
     obs_as_cond: True
     n_cond_layers: 0
@@ -120,13 +120,26 @@ policy:
   # Stage-2 DDIM jump distillation
   distill_freq: "50hz"
   distill_num_scales: 40
-  stop_time_sample_mode: zero
+  stop_time_sample_mode: ctm_full
   stop_time_zero_prob: 0.5
   ctm_loss_weight: 0.5
   dsm_loss_weight: 1.0
   regularize_10hz_weight: 0.25
   distill_delta: 0.0
   use_ctm_inference: True
+
+  # CTM distillation enhancements (from consistency-policy)
+  use_projection: True          # Project pred/target back to t=0 before CTM loss
+  teacher_ode_steps: 2          # Multi-step DDIM for teacher (1 = original single-step)
+  dsm_time_sample_mode: "mixed" # "uniform" | "log_normal" | "mixed"
+  dsm_P_std: 1.2                # log-normal std for DSM time sampling
+  dsm_P_mean: -1.2              # log-normal mean for DSM time sampling
+
+  # Consistency-policy inspired improvements
+  use_soft_landing: True         # Soft-landing skip connection (CTM identity constraint)
+  always_project: True           # Always project pred/target to t=0 (per-sample)
+  dsm_snr_weighting: True        # SNR-based weighting for DSM loss (Karras equivalent)
+  ctm_ema_initial_decay: 0.0     # Initial EMA decay for CTM (low = track student closely)
 
 ema:
   _target_: ImplicitRDP.model.diffusion.ema_model.EMAModel

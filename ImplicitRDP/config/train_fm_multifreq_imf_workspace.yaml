@@ -1,0 +1,180 @@
+defaults:
+  - task: real_dual_switch_image_wrench_offline_10fps_acp
+  - _self_
+
+name: train_fm_multifreq_imf_workspace
+_target_: ImplicitRDP.workspace.train_fm_multifreq_imf_workspace.TrainFMMultiFreqIMFWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "default"
+
+horizon: 16
+n_obs_steps: 2
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+n_action_steps: ${eval:'${horizon}-${dataset_obs_steps}+1'}
+n_emb: 768
+
+ckpt_path: null
+
+policy:
+  _target_: ImplicitRDP.policy.fm_multifreq_imf_policy.FMMultiFreqIMFPolicy
+
+  shape_meta: ${task.model_shape_meta}
+
+  obs_encoder:
+    _target_: ImplicitRDP.model.vision.transformer_obs_encoder.TransformerObsEncoder
+    shape_meta: ${task.model_shape_meta}
+    obs_horizon: ${n_obs_steps}
+    global_pool: ''
+    n_emb: ${n_emb}
+    model_name: 'resnet34'
+    pretrained: False
+    frozen: False
+    feature_aggregation: null
+    downsample_ratio: 32
+    transforms:
+      - type: CenterCrop
+      - _target_: torchvision.transforms.RandomRotation
+        degrees:
+          - -5.0
+          - 5.0
+        expand: false
+      - _target_: torchvision.transforms.ColorJitter
+        brightness: 0.3
+        contrast: 0.4
+        saturation: 0.5
+        hue: 0.08
+    use_group_norm: True
+    share_rgb_model: False
+
+  model:
+    _target_: ImplicitRDP.model.diffusion.transformer_for_imf_multifreq.TransformerForIMFMultiFreq
+    shape_meta: ${task.model_shape_meta}
+    n_obs_steps: ${n_obs_steps}
+    cond_dim: ${n_emb}
+    n_layer: 7
+    n_head: 4
+    n_emb: ${n_emb}
+    p_drop_emb: 0.0
+    p_drop_attn: 0.1
+    time_as_cond: True
+    obs_as_cond: True
+    n_cond_layers: 0
+    horizon_10hz: 16
+    horizon_50hz: 80
+    # iMF dual-head: 3 shared + 4 per head
+    aux_head_depth: 4
+
+  n_emb: ${n_emb}
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+
+  # Flow Matching time sampling
+  num_inference_steps: 1
+  beta_a: 1.5
+  beta_b: 1.0
+
+  use_rnn_obs_encoder: True
+  rnn_obs_encoder_n_layer: 1
+  rnn_obs_encoder_hidden_dim: 512
+
+  use_amp_for_inference: False
+  amp_dtype: "bf16"
+
+  horizon_10hz: 16
+  horizon_50hz: 80
+  action_start_10hz: 1
+  action_start_50hz: 13
+
+  inference_head: "50hz"
+
+  # iMF specific parameters
+  data_proportion: 0.5    # 50% FM (r=t), 50% MeanFlow (r<t)
+  norm_p: 1.0             # adaptive weight exponent
+  norm_eps: 0.01           # adaptive weight epsilon
+
+ema:
+  _target_: ImplicitRDP.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+optimizer:
+  lr: 2.0e-4
+  weight_decay: 1.0e-6
+  obs_encoder_lr: 3.0e-5
+  obs_encoder_weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  pretrained_ckpt_path: null
+  use_amp: False
+  amp_dtype: "bf16"
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  num_epochs: 800
+  gradient_accumulate_every: 1
+  max_grad_norm: 1.0
+  use_ema: True
+  freeze_encoder: False
+  rollout_every: 50
+  checkpoint_every: 10
+  val_every: 1
+  sample_every: 5
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: fm_multifreq_imf_policy
+  resume: False
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}

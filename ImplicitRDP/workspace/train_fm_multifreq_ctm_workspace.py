@@ -96,6 +96,22 @@ class TrainFMMultiFreqCTMWorkspace(BaseWorkspace):
         unwrapped_model.set_teacher_model(teacher_model)
         unwrapped_model.set_training_stage(2)
 
+        # ---- Fix: Freeze obs_encoder and RNN encoders in Stage 2 ----
+        # Prevents feature drift that would invalidate the frozen teacher's
+        # targets and corrupt both 10hz and 50hz heads.
+        unwrapped_model.obs_encoder.eval()
+        unwrapped_model.obs_encoder.requires_grad_(False)
+        logger.info("Stage 2: froze obs_encoder")
+
+        if unwrapped_model.rnn_lowfreq is not None:
+            unwrapped_model.rnn_lowfreq.eval()
+            unwrapped_model.rnn_lowfreq.requires_grad_(False)
+            logger.info("Stage 2: froze rnn_lowfreq")
+        if unwrapped_model.rnn_highfreq is not None:
+            unwrapped_model.rnn_highfreq.eval()
+            unwrapped_model.rnn_highfreq.requires_grad_(False)
+            logger.info("Stage 2: froze rnn_highfreq")
+
         if self.ema_model is not None:
             self.ema_model.load_state_dict(unwrapped_model.state_dict(), strict=False)
             self.ema_model.to(device)
@@ -127,6 +143,25 @@ class TrainFMMultiFreqCTMWorkspace(BaseWorkspace):
             last_epoch=-1,
         )
 
+        # ---- Fix: Reset EMA with fresh step counter for Stage 2 ----
+        # After Stage 1, the EMA's optimization_step is very large, giving
+        # decay ≈ 0.9999 and making the target nearly frozen.  By creating
+        # a fresh EMAModel the step counter starts at 0 and decay ramps up
+        # from min_value (0.0), matching the original consistency-policy
+        # design where target = student at the beginning of distillation.
+        ema = EMAModel(
+            model=self.ema_model,
+            update_after_step=cfg.ema.update_after_step,
+            inv_gamma=cfg.ema.inv_gamma,
+            power=cfg.ema.power,
+            min_value=cfg.ema.min_value,
+            max_value=cfg.ema.max_value,
+        )
+        logger.info(
+            "Stage 2: created fresh EMAModel (step=0, decay will ramp from "
+            f"{cfg.ema.min_value} to {cfg.ema.max_value})"
+        )
+
         prepared = accelerator.prepare(
             train_dataloader,
             val_dataloader,
@@ -147,7 +182,7 @@ class TrainFMMultiFreqCTMWorkspace(BaseWorkspace):
             f"Entered Stage 2 CTM distillation with lr={stage2_lr}, "
             f"obs_encoder_lr={stage2_obs_encoder_lr}"
         )
-        return train_dataloader, val_dataloader, lr_scheduler
+        return train_dataloader, val_dataloader, lr_scheduler, ema
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -254,7 +289,7 @@ class TrainFMMultiFreqCTMWorkspace(BaseWorkspace):
                             self.save_checkpoint(path=stage1_path)
                             self.model = model_ddp
                             logger.info(f"Saved Stage-1 checkpoint to {stage1_path}")
-                        train_dataloader, val_dataloader, lr_scheduler = self._enter_stage2(
+                        train_dataloader, val_dataloader, lr_scheduler, ema = self._enter_stage2(
                             cfg, accelerator, train_dataloader, val_dataloader, device
                         )
                         stage2_started = True
@@ -270,6 +305,17 @@ class TrainFMMultiFreqCTMWorkspace(BaseWorkspace):
                 if cfg.training.freeze_encoder and self.current_stage == 1:
                     unwrapped_model.obs_encoder.eval()
                     unwrapped_model.obs_encoder.requires_grad_(False)
+
+                # ---- Fix: keep encoders frozen after model.train() in Stage 2 ----
+                if self.current_stage == 2:
+                    unwrapped_model.obs_encoder.eval()
+                    unwrapped_model.obs_encoder.requires_grad_(False)
+                    if unwrapped_model.rnn_lowfreq is not None:
+                        unwrapped_model.rnn_lowfreq.eval()
+                        unwrapped_model.rnn_lowfreq.requires_grad_(False)
+                    if unwrapped_model.rnn_highfreq is not None:
+                        unwrapped_model.rnn_highfreq.eval()
+                        unwrapped_model.rnn_highfreq.requires_grad_(False)
 
                 step_log = {}
                 train_losses = []

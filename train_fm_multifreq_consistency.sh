@@ -2,16 +2,16 @@
 
 #--------------------------------
 # Config
-GPU_ID=0,1,2,3,4,5,6,7
+GPU_ID=4,5,6,7
 
 TASK="dual_switch"
-DATASET_VERSION="v4"
+DATASET_VERSION="v6"
 TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 
 NUM_EPOCHS=900
 POLICY_LR=1.0e-4
 
-DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_1_zarr"
+DATASET_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_1_zarr"
 
 USE_AMP_FOR_POLICY=False
 AMP_DTYPE_FOR_POLICY="bf16"

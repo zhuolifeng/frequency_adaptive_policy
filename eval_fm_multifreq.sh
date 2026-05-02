@@ -1,14 +1,14 @@
 #!/bin/bash
 
 TASK="${TASK:-dual_switch}"
-DATASET_VERSION="${DATASET_VERSION:-v4.2}"
+DATASET_VERSION="${DATASET_VERSION:-v6.1}"
 ROUND="${ROUND:-1}"
 
 # POLICY_TYPE options:
 #   fm          -> train_fm_multifreq_workspace
 #   consistency -> train_fm_multifreq_consistency_workspace
 #   ctm         -> train_fm_multifreq_ctm_workspace
-POLICY_TYPE="${POLICY_TYPE:-fm}"
+POLICY_TYPE="${POLICY_TYPE:-ctm}"
 if [ -z "${CONFIG_NAME}" ]; then
     case "${POLICY_TYPE}" in
         fm)
@@ -28,18 +28,18 @@ if [ -z "${CONFIG_NAME}" ]; then
 fi
 
 # Checkpoint path. Override with CKPT_PATH=/path/to/checkpoint.ckpt.
-CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/frequency_adaptive_policy/data/outputs/2026.04.19/14.11.21_train_fm_multifreq_workspace_dual_switch_v4_fm_multifreq/checkpoints/latest.ckpt}"
+CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.04.30/17.43.24_train_fm_multifreq_ctm_workspace_dual_switch_v6_fm_multifreq_ctm/checkpoints/ctm_final.ckpt}"
 
 # Dataset path. Override with DATASET_PATH=/path/to/zarr.
 DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
-GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
+GPU_DEVICE="${GPU_DEVICE:-cuda:6}"
 
 VIDEO_FPS="${VIDEO_FPS:-1}"
 NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-1}"
 USE_DISTILLATION="${USE_DISTILLATION:-True}"
 
-OUTPUT_DIR="${OUTPUT_DIR:-evaluations_fm_multifreq}"
+OUTPUT_DIR="${OUTPUT_DIR:-evaluations_fm_multifreq_ctm_1steps}"
 
 echo "=========================================="
 echo "FM MultiFreq Policy Evaluation"

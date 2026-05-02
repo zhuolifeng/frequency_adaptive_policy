@@ -60,6 +60,7 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
         ctm_freq: str = "50hz",
         inference_head: str = "50hz",
         training_stage: int = 1,
+        fm_preserve_loss_weight: float = 1.0,
         **kwargs,
     ):
         super().__init__(
@@ -100,6 +101,7 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
         self.stop_time_zero_prob = stop_time_zero_prob
         self.ctm_delta = ctm_delta
         self.ctm_freq = ctm_freq
+        self.fm_preserve_loss_weight = fm_preserve_loss_weight
 
         assert self.ctm_num_scales >= 2
         assert self.ctm_freq in ("10hz", "50hz", "both")
@@ -107,18 +109,27 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
         assert 0.0 <= self.stop_time_zero_prob <= 1.0
         assert self.ctm_loss_weight >= 0.0
         assert self.dsm_loss_weight >= 0.0
+        assert self.fm_preserve_loss_weight >= 0.0
 
         logger.info(
             "FMMultiFreqCTMPolicy initialized "
             f"(stage={training_stage}, ctm_num_scales={ctm_num_scales}, "
             f"ctm_beta=({self.ctm_beta_a}, {self.ctm_beta_b}), "
             f"ctm_freq={ctm_freq}, ctm_chain_to_zero={ctm_chain_to_zero}, "
-            f"loss_weights=({ctm_loss_weight}, {dsm_loss_weight}))"
+            f"loss_weights=({ctm_loss_weight}, {dsm_loss_weight}), "
+            f"fm_preserve_loss_weight={fm_preserve_loss_weight})"
         )
 
     def set_teacher_model(self, teacher):
-        if "frozen_teacher" in self._modules:
-            del self._modules["frozen_teacher"]
+        # Store as a buffer-like attribute that follows .to(device) but does
+        # NOT appear in state_dict() (we don't want to save the teacher).
+        # Using register_module would include it in state_dict; using
+        # __dict__ would skip .to(device).  Solution: register as a module
+        # but exclude it explicitly during save via exclude_keys.
+        if hasattr(self, "_frozen_teacher_ref"):
+            del self._frozen_teacher_ref
+        # Keep a plain reference that we access in forward code
+        self._frozen_teacher_ref = [teacher]  # wrap in list to avoid nn.Module registration
         self.__dict__["frozen_teacher"] = teacher
 
     def set_ema_model_ref(self, ema_model):
@@ -179,23 +190,45 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
         return pred_v_10, noise_10 - nactions_10, pred_v_50, noise_50 - nactions_50
 
     def _sample_t_u_s(self, B: int, device: torch.device):
+        """Sample (t, u, s) on the discrete grid, matching the original CTM.
+
+        All three values live on the grid  t_RF = 1 - index / N  so that
+        training timesteps are perfectly aligned with the inference grid.
+
+        In bin-index space  (index 0 = pure noise,  index N = clean data):
+            t_idx  ∈ [0, N-2]            Beta-distributed
+            s_idx  ∈ [t_idx, N]          uniform, optionally biased to N (s=0)
+            u_idx  = min(t_idx + 1, s_idx)   one teacher Heun step
+        """
+        N = self.ctm_num_scales
+
+        # ---- t: Beta → snap to grid index [0, N-2] ----
         noise_level = torch.distributions.Beta(
             self.ctm_beta_a, self.ctm_beta_b
         ).sample((B,)).to(device)
-        indices = ((1.0 - noise_level) * (self.ctm_num_scales - 1)).long()
-        indices = indices.clamp(0, self.ctm_num_scales - 2)
+        t_indices = ((1.0 - noise_level) * (N - 1)).long().clamp(0, N - 2)
 
-        t = 1.0 - indices.float() / self.ctm_num_scales
-        u = 1.0 - (indices + 1).float() / self.ctm_num_scales
+        # ---- s: uniform over [t_idx, N] on the grid (original CTM style) ----
+        range_sizes = (N - t_indices + 1).float()          # number of valid bins
+        s_offsets = torch.floor(torch.rand(B, device=device) * range_sizes).long()
+        s_indices = (t_indices + s_offsets).clamp(max=N)
 
         if self.stop_time_sample_mode == "zero":
-            s = torch.zeros_like(u)
-        elif self.stop_time_sample_mode == "uniform":
-            s = torch.rand_like(u) * u
-        else:
-            s_uniform = torch.rand_like(u) * u
-            use_zero = torch.rand_like(u) < self.stop_time_zero_prob
-            s = torch.where(use_zero, torch.zeros_like(u), s_uniform)
+            s_indices = torch.full_like(t_indices, N)
+        elif self.stop_time_sample_mode == "mixed":
+            use_zero = torch.rand(B, device=device) < self.stop_time_zero_prob
+            s_indices = torch.where(
+                use_zero, torch.full_like(t_indices, N), s_indices
+            )
+        # "uniform" → keep s as sampled above
+
+        # ---- u: one Heun step toward clean, never past s (original CTM) ----
+        u_indices = torch.min(t_indices + 1, s_indices)
+
+        # ---- convert bin indices to RF time ----
+        t = 1.0 - t_indices.float() / N
+        u = 1.0 - u_indices.float() / N
+        s = (1.0 - s_indices.float() / N).clamp(min=0.0)
 
         return t, u, s
 
@@ -225,8 +258,10 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
     def _huber_or_mse(pred: torch.Tensor, target: torch.Tensor, delta: float):
         if delta <= 0:
             return F.mse_loss(pred, target)
-        mse = F.mse_loss(pred, target, reduction="none")
-        return (torch.sqrt(mse.square() + delta * delta) - delta).mean()
+        # Pseudo-Huber loss: sqrt((pred - target)² + δ²) - δ
+        # F.mse_loss with reduction="none" already gives (pred - target)²
+        sq_err = F.mse_loss(pred, target, reduction="none")
+        return (torch.sqrt(sq_err + delta * delta) - delta).mean()
 
     def _teacher_heun_step(
         self,
@@ -294,37 +329,82 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
             )
 
         if self.ctm_chain_to_zero:
+            # Only chain samples where s > 0; when s == 0 the transition
+            # G(x, 0, 0) = x (identity), so the two extra ema_model_ref
+            # forward passes would be pure waste.
             zero = torch.zeros_like(s)
-            pred_cmp = self._transition(
-                self.ema_model_ref,
-                pred_s,
-                s,
-                zero,
-                obs_tokens,
-                temporal_cond,
-                freq_mode,
-            )
-            with torch.no_grad():
-                target_cmp = self._transition(
-                    self.ema_model_ref,
-                    target_s,
-                    s,
-                    zero,
-                    obs_tokens,
-                    temporal_cond,
-                    freq_mode,
+            needs_chain = s > 1e-6  # per-sample mask
+
+            if needs_chain.any():
+                # Run chain-to-zero only on the subset that actually needs it
+                idx = needs_chain.nonzero(as_tuple=True)[0]
+                pred_s_sub = pred_s[idx]
+                target_s_sub = target_s[idx]
+                s_sub = s[idx]
+                zero_sub = zero[idx]
+                obs_sub = obs_tokens[idx]
+                tc_sub = temporal_cond[idx] if temporal_cond is not None else None
+
+                pred_chain_sub = self._transition(
+                    self.ema_model_ref, pred_s_sub, s_sub, zero_sub,
+                    obs_sub, tc_sub, freq_mode,
                 )
+                with torch.no_grad():
+                    target_chain_sub = self._transition(
+                        self.ema_model_ref, target_s_sub, s_sub, zero_sub,
+                        obs_sub, tc_sub, freq_mode,
+                    )
+
+                # Assemble full tensors: chain result where s>0, direct where s==0
+                pred_cmp = pred_s.clone()
+                pred_cmp[idx] = pred_chain_sub
+                target_cmp = target_s.clone()
+                target_cmp[idx] = target_chain_sub
+            else:
+                # All s == 0 → chain is identity, skip entirely
+                pred_cmp = pred_s
+                target_cmp = target_s
         else:
             pred_cmp = pred_s
             target_cmp = target_s
 
         ctm_loss = self._huber_or_mse(pred_cmp, target_cmp.detach(), self.ctm_delta)
 
-        zero = torch.zeros_like(t)
+        # ---- DSM loss with independent continuous t (matches original CTM) ----
+        # Original uses ctm_dsm sampler = 50% uniform + 50% log-normal,
+        # covering continuous time range (not just the discrete grid).
+        # We adapt this for Rectified Flow: t ∈ [0.001, 1.0] continuous.
+        B_half = B // 2
+        B_rest = B - B_half
+
+        # 50%: uniform over [0.001, 1.0]
+        t_uniform = torch.rand(B_half, device=device) * 0.999 + 0.001
+        # 50%: Beta distribution (our analog of log-normal, biased toward 1.0)
+        t_beta = torch.distributions.Beta(
+            self.ctm_beta_a, self.ctm_beta_b
+        ).sample((B_rest,)).to(device)
+        t_beta = t_beta * 0.999 + 0.001
+
+        t_dsm = torch.cat([t_uniform, t_beta], dim=0)
+        # Shuffle to mix the two distributions
+        perm = torch.randperm(B, device=device)
+        t_dsm = t_dsm[perm]
+
+        noise_dsm = torch.randn_like(x0)
+        x_t_dsm = t_dsm.view(B, 1, 1) * noise_dsm + (1.0 - t_dsm.view(B, 1, 1)) * x0
+        zero_dsm = torch.zeros_like(t_dsm)
+
         pred_x0 = self._transition(
-            self.model, x_t, t, zero, obs_tokens, temporal_cond, freq_mode
+            self.model, x_t_dsm, t_dsm, zero_dsm, obs_tokens, temporal_cond, freq_mode
         )
-        dsm_loss = self._huber_or_mse(pred_x0, x0, self.ctm_delta)
+
+        # Rectified Flow weighting: 1/t to balance noise levels
+        # (analog of Karras weighting (σ²+σ_d²)/(σ·σ_d)² for RF)
+        dsm_weights = (1.0 / t_dsm).view(B, 1, 1)
+        dsm_weights = dsm_weights / dsm_weights.mean()  # normalize to keep loss scale
+
+        dsm_loss_raw = F.mse_loss(pred_x0, x0, reduction="none")
+        dsm_loss = (dsm_loss_raw * dsm_weights).mean()
 
         total = (
             self.ctm_loss_weight * ctm_loss
@@ -373,6 +453,37 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
                 "ctm_loss_50hz": ctm_50.item(),
                 "dsm_loss_50hz": dsm_50.item(),
             })
+
+        # ---- Fix: 10hz FM velocity-matching preservation loss ----
+        # When ctm_freq is "50hz" (default), the 10hz head receives no
+        # gradient signal.  Since 10hz and 50hz share the backbone, 50hz
+        # CTM gradients corrupt the 10hz head (catastrophic forgetting).
+        # This preservation loss keeps 10hz aligned with its Stage-1
+        # velocity field through the shared backbone.
+        if self.fm_preserve_loss_weight > 0.0 and self.ctm_freq != "both":
+            # Only needed when ctm_freq does NOT already cover 10hz
+            t = torch.distributions.Beta(self.beta_a, self.beta_b).sample(
+                (B,)
+            ).to(nactions_10.device)
+            t = t * 0.999 + 0.001
+            timesteps = (t * 1000).long()
+            stop_timesteps = torch.zeros_like(timesteps)
+            t_exp = t.view(B, 1, 1)
+
+            noise_10 = torch.randn_like(nactions_10)
+            x_t_10 = t_exp * noise_10 + (1.0 - t_exp) * nactions_10
+            pred_v_10 = self.model(
+                x_t_10,
+                timesteps,
+                stop_timestep=stop_timesteps,
+                cond=obs_tokens,
+                temporal_cond=temporal_cond_10hz,
+                freq_mode="10hz",
+            )
+            target_v_10 = noise_10 - nactions_10
+            fm_preserve_loss = F.mse_loss(pred_v_10, target_v_10)
+            total_loss = total_loss + self.fm_preserve_loss_weight * fm_preserve_loss
+            metrics["fm_preserve_loss_10hz"] = fm_preserve_loss.item()
 
         metrics["total_loss"] = total_loss.item()
         metrics["training_stage"] = 2.0
@@ -437,6 +548,16 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
         noisy_trajectory=None,
         **kwargs,
     ):
+        """Chaining-style CTM sampler (matches consistency-policy design).
+
+        Every step jumps all the way to s=0 (the most-trained target),
+        then re-noises to a grid-aligned intermediate t for the next step.
+        This avoids using (t, s) pairs that were rarely seen during training.
+
+        1-step:  G(noise, t=1.0, s=0) → clean
+        2-step:  G(noise, t=1.0, s=0) → clean
+                 re-noise to t_mid → G(x, t_mid, s=0) → clean_refined
+        """
         steps = num_inference_steps if num_inference_steps is not None else 1
         if noisy_trajectory is None:
             x_t = torch.randn(
@@ -449,22 +570,41 @@ class FMMultiFreqCTMPolicy(FMMultiFreqPolicy):
             x_t = noisy_trajectory
 
         B = x_t.shape[0]
-        t_schedule = torch.linspace(1.0, 0.0, steps + 1, device=x_t.device)
-        for i in range(steps):
-            t = torch.full((B,), t_schedule[i].item(), device=x_t.device)
-            s = torch.full((B,), t_schedule[i + 1].item(), device=x_t.device)
+        N = self.ctm_num_scales
+        zero = torch.zeros(B, device=x_t.device)
+
+        if steps == 1:
+            # Single step: G(noise, t=1.0, s=0) → clean
+            t = torch.ones(B, device=x_t.device)
             x_t = self._transition(
-                self.model,
-                x_t,
-                t,
-                s,
-                cond,
-                temporal_cond,
-                freq_mode,
+                self.model, x_t, t, zero, cond, temporal_cond, freq_mode,
             )
-            if i < steps - 1:
-                eps = torch.randn_like(x_t)
-                x_t = s.view(B, 1, 1) * eps + (1.0 - s.view(B, 1, 1)) * x_t
+        else:
+            # Multi-step chaining: pick re-noise points on the training grid.
+            # E.g. 2-step with N=120: chain at grid index 60 → t = 1-60/120 = 0.5
+            # E.g. 3-step with N=120: chain at indices 40,80 → t = 0.667, 0.333
+            chain_indices = torch.linspace(0, N, steps + 1)[1:-1].long()
+            chain_times = 1.0 - chain_indices.float() / N  # on the training grid
+
+            for i in range(steps):
+                if i == 0:
+                    t = torch.ones(B, device=x_t.device)
+                else:
+                    t = torch.full((B,), chain_times[i - 1].item(), device=x_t.device)
+
+                # Jump all the way to s=0
+                x_clean = self._transition(
+                    self.model, x_t, t, zero, cond, temporal_cond, freq_mode,
+                )
+
+                if i < steps - 1:
+                    # Re-noise to the next grid-aligned chaining point
+                    t_next = chain_times[i].item()
+                    eps = torch.randn_like(x_clean)
+                    x_t = t_next * eps + (1.0 - t_next) * x_clean
+                else:
+                    x_t = x_clean
+
         return x_t
 
     def _predict_from_obs_tokens_and_noisy_trajectory(

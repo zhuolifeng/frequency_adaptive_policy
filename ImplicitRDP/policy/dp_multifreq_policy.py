@@ -62,6 +62,17 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         regularize_10hz_weight: float = 0.25,
         distill_delta: float = 0.0,
         use_ctm_inference: bool = True,
+        # CTM distillation enhancements
+        use_projection: bool = False,
+        teacher_ode_steps: int = 1,
+        dsm_time_sample_mode: str = "uniform",
+        dsm_P_std: float = 1.2,
+        dsm_P_mean: float = -1.2,
+        # --- Consistency-policy inspired improvements ---
+        use_soft_landing: bool = True,
+        always_project: bool = True,
+        dsm_snr_weighting: bool = True,
+        ctm_ema_initial_decay: float = 0.0,
         **kwargs,
     ):
         super().__init__()
@@ -129,6 +140,15 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         self.regularize_10hz_weight = regularize_10hz_weight
         self.distill_delta = distill_delta
         self.use_ctm_inference = use_ctm_inference
+        self.use_projection = use_projection
+        self.teacher_ode_steps = teacher_ode_steps
+        self.dsm_time_sample_mode = dsm_time_sample_mode
+        self.dsm_P_std = dsm_P_std
+        self.dsm_P_mean = dsm_P_mean
+        self.use_soft_landing = use_soft_landing
+        self.always_project = always_project
+        self.dsm_snr_weighting = dsm_snr_weighting
+        self.ctm_ema_initial_decay = ctm_ema_initial_decay
         self.kwargs = kwargs
 
         self.frozen_teacher = None
@@ -137,7 +157,7 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         assert self.inference_head in ("10hz", "50hz")
         assert self.distill_freq in ("10hz", "50hz", "both")
         assert self.distill_num_scales >= 2
-        assert self.stop_time_sample_mode in ("zero", "uniform", "mixed")
+        assert self.stop_time_sample_mode in ("zero", "uniform", "mixed", "ctm_full")
 
         self.use_amp_for_inference = use_amp_for_inference
         if use_amp_for_inference:
@@ -399,6 +419,89 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         mse = F.mse_loss(pred, target, reduction="none")
         return (torch.sqrt(mse.square() + delta * delta) - delta).mean()
 
+    def _apply_soft_landing(
+        self,
+        pred_s: torch.Tensor,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        s: torch.Tensor,
+    ) -> torch.Tensor:
+        """Soft-landing skip connection (from CTM paper).
+
+        Ensures G_θ(x_t, t, s=t) = x_t (identity when stop_time equals start_time).
+
+        Uses beta = 1 - alpha_cumprod (noise variance, analogous to σ² in Karras).
+        ratio = sqrt(beta_s / beta_t):
+          - When s == t:  ratio = 1.0  → output = x_t  (identity)        ✓
+          - When s == 0:  beta_0 ≈ 0   → ratio ≈ 0 → output ≈ pred_s     ✓
+        This is the DDIM-framework equivalent of consistency-policy's
+        ``G_θ = x · (s/t) + g_θ · (1 - s/t)``.
+        """
+        if not self.use_soft_landing:
+            return pred_s
+        alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
+            device=pred_s.device, dtype=pred_s.dtype
+        )
+        alpha_t = alphas_cumprod[t.clamp(0, len(alphas_cumprod) - 1).long()].view(-1, 1, 1)
+        alpha_s = alphas_cumprod[s.clamp(0, len(alphas_cumprod) - 1).long()].view(-1, 1, 1)
+        beta_t = (1.0 - alpha_t).clamp_min(1e-12)
+        beta_s = (1.0 - alpha_s).clamp_min(1e-12)
+        ratio = (beta_s / beta_t).sqrt()
+        return x_t * ratio + pred_s * (1.0 - ratio)
+
+    def _get_snr_weights(self, timesteps: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """Compute SNR-based weights analogous to Karras weighting.
+
+        weight = (SNR + 1) / SNR, where SNR = α_cumprod / (1 - α_cumprod).
+        This up-weights low-noise timesteps (fine details) and is the DDIM-framework
+        equivalent of Karras weighting ``(σ² + σ_d²) / (σ·σ_d)²``.
+        """
+        alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(device=device)
+        alpha = alphas_cumprod[timesteps.long()]
+        snr = alpha / (1.0 - alpha).clamp_min(1e-12)
+        # Clamp SNR to avoid extreme weights at very low noise
+        snr = snr.clamp(min=1e-4, max=1e4)
+        return ((snr + 1.0) / snr).detach()
+
+    def _sample_dsm_timesteps_log_normal(
+        self, B: int, device: torch.device
+    ) -> torch.Tensor:
+        """Sample timesteps via log-normal distribution (biased toward low noise)."""
+        N = self.noise_scheduler.config.num_train_timesteps
+        sigma = (
+            torch.randn(B, device=device) * self.dsm_P_std + self.dsm_P_mean
+        ).exp()
+        # Map continuous sigma to discrete timestep via alpha_cumprod lookup
+        alpha = 1.0 / (1.0 + sigma ** 2)
+        alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(device)
+        diffs = (alphas_cumprod.unsqueeze(0) - alpha.unsqueeze(1)).abs()
+        t = diffs.argmin(dim=1)
+        return t.clamp(0, N - 1).long()
+
+    def _sample_dsm_timesteps(
+        self, B: int, device: torch.device
+    ) -> torch.Tensor:
+        """Sample timesteps for DSM loss using configurable strategy.
+
+        Modes:
+            uniform  – original uniform sampling (default, backward compatible)
+            log_normal – biased toward low-noise region
+            mixed    – 50 % log-normal + 50 % uniform (matches consistency-policy)
+        """
+        N = self.noise_scheduler.config.num_train_timesteps
+
+        if self.dsm_time_sample_mode == "uniform":
+            return torch.randint(0, N, (B,), device=device).long()
+        elif self.dsm_time_sample_mode == "log_normal":
+            return self._sample_dsm_timesteps_log_normal(B, device)
+        elif self.dsm_time_sample_mode == "mixed":
+            half = B // 2
+            t_ln = self._sample_dsm_timesteps_log_normal(half, device)
+            t_uni = torch.randint(0, N, (B - half,), device=device).long()
+            return torch.cat([t_ln, t_uni], dim=0)
+        else:
+            return torch.randint(0, N, (B,), device=device).long()
+
     def _sample_t_u_s(self, B: int, device: torch.device):
         N = self.noise_scheduler.config.num_train_timesteps
         if self.distill_num_scales < N:
@@ -415,11 +518,17 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         elif self.stop_time_sample_mode == "uniform":
             r = torch.rand_like(u.float())
             s = torch.floor(r * (u.float() + 1.0)).long()
-        else:
+        elif self.stop_time_sample_mode in ("mixed", "ctm_full"):
+            # ctm_full: same as mixed — s ∈ [0, u] with stop_time_zero_prob
+            # chance of forcing s=0, aligning with consistency-policy CTM sampling
             r = torch.rand_like(u.float())
             s_uniform = torch.floor(r * (u.float() + 1.0)).long()
             use_zero = torch.rand_like(u.float()) < self.stop_time_zero_prob
             s = torch.where(use_zero, torch.zeros_like(u), s_uniform)
+        else:
+            raise ValueError(
+                f"Unknown stop_time_sample_mode: {self.stop_time_sample_mode}"
+            )
         return t, u, s
 
     def _compute_ddim_distill_loss_one_freq(
@@ -439,50 +548,160 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         t, u, s = self._sample_t_u_s(B, device)
         x_t = self.noise_scheduler.add_noise(x0, noise, t)
 
+        # --- Teacher: walk from x_t at timestep t to x_u at timestep u ---
         with torch.no_grad():
-            teacher_out = self.frozen_teacher(
-                x_t,
-                t,
-                cond=obs_tokens,
-                temporal_cond=temporal_cond,
-                freq_mode=freq_mode,
-            )
-            x_u = self._ddim_jump_to(x_t, teacher_out, t, u)
+            if self.teacher_ode_steps <= 1:
+                # Original single-step DDIM jump
+                teacher_out = self.frozen_teacher(
+                    x_t, t,
+                    cond=obs_tokens,
+                    temporal_cond=temporal_cond,
+                    freq_mode=freq_mode,
+                )
+                x_u = self._ddim_jump_to(x_t, teacher_out, t, u)
+            else:
+                # Multi-step DDIM: walk teacher_ode_steps from t to u
+                N = self.noise_scheduler.config.num_train_timesteps
+                x_cur = x_t
+                t_cur = t
+                for step_i in range(self.teacher_ode_steps):
+                    ratio = (step_i + 1) / self.teacher_ode_steps
+                    t_next = torch.round(
+                        t.float() * (1 - ratio) + u.float() * ratio
+                    ).long().clamp(0, N - 1)
+                    teacher_out = self.frozen_teacher(
+                        x_cur, t_cur,
+                        cond=obs_tokens,
+                        temporal_cond=temporal_cond,
+                        freq_mode=freq_mode,
+                    )
+                    x_cur = self._ddim_jump_to(x_cur, teacher_out, t_cur, t_next)
+                    t_cur = t_next
+                x_u = x_cur
 
+        # --- Student: predict from x_t to s ---
         student_out = self.ctm_model(
-            x_t,
-            t,
-            stop_timestep=s,
+            x_t, t, stop_timestep=s,
             cond=obs_tokens,
             temporal_cond=temporal_cond,
             freq_mode=freq_mode,
         )
         pred_s = self._ddim_jump_to(x_t, student_out, t, s)
+        # Apply soft-landing skip connection (CTM identity constraint)
+        pred_s = self._apply_soft_landing(pred_s, x_t, t, s)
 
+        # --- EMA target: predict from x_u to s ---
         with torch.no_grad():
             target_out = self.ema_model_ref(
-                x_u,
-                u,
-                stop_timestep=s,
+                x_u, u, stop_timestep=s,
                 cond=obs_tokens,
                 temporal_cond=temporal_cond,
                 freq_mode=freq_mode,
             )
             target_s = self._ddim_jump_to(x_u, target_out, u, s)
+            # Apply soft-landing to EMA target as well
+            target_s = self._apply_soft_landing(target_s, x_u, u, s)
 
-        ctm_loss = self._huber_or_mse(pred_s, target_s.detach(), self.distill_delta)
+        # --- CTM loss with always-on per-sample projection to t=0 ---
+        # Following consistency-policy: always project pred and target to t=0
+        # via EMA model to enforce CTM consistency constraint.
+        if self.always_project:
+            # Per-sample: only project samples where s != 0
+            needs_proj = (s != 0)
+            if needs_proj.any():
+                zero_proj = torch.zeros_like(s)
+                # Project pred_s → t=0 via EMA model.
+                # pred_s carries grad from ctm_model; ema_model_ref params are frozen
+                # but autograd flows through the input tensor.
+                proj_pred_out = self.ema_model_ref(
+                    pred_s, s, stop_timestep=zero_proj,
+                    cond=obs_tokens,
+                    temporal_cond=temporal_cond,
+                    freq_mode=freq_mode,
+                )
+                proj_pred_raw = self._ddim_jump_to(pred_s, proj_pred_out, s, zero_proj)
+                # No soft-landing here: projection stop=0, so ratio≈0 (no-op).
+                # Applying it would redundantly blend with pred_s which already
+                # has soft-landing from the student step.
 
-        zero = torch.zeros_like(t)
+                with torch.no_grad():
+                    proj_target_out = self.ema_model_ref(
+                        target_s, s, stop_timestep=zero_proj,
+                        cond=obs_tokens,
+                        temporal_cond=temporal_cond,
+                        freq_mode=freq_mode,
+                    )
+                    proj_target_raw = self._ddim_jump_to(
+                        target_s, proj_target_out, s, zero_proj
+                    )
+                    # No soft-landing here either (same reason)
+
+                # Per-sample: use projected values where s!=0, direct values where s==0
+                needs_proj_mask = needs_proj.view(-1, 1, 1).float()
+                ctm_pred = proj_pred_raw * needs_proj_mask + pred_s * (1.0 - needs_proj_mask)
+                ctm_target = proj_target_raw * needs_proj_mask + target_s * (1.0 - needs_proj_mask)
+            else:
+                # All samples have s==0, no projection needed
+                ctm_pred = pred_s
+                ctm_target = target_s
+        elif self.use_projection and (s != 0).any():
+            # Legacy: optional projection (backward compatible)
+            zero_proj = torch.zeros_like(s)
+            proj_pred_out = self.ema_model_ref(
+                pred_s, s, stop_timestep=zero_proj,
+                cond=obs_tokens,
+                temporal_cond=temporal_cond,
+                freq_mode=freq_mode,
+            )
+            ctm_pred = self._ddim_jump_to(pred_s, proj_pred_out, s, zero_proj)
+
+            with torch.no_grad():
+                proj_target_out = self.ema_model_ref(
+                    target_s, s, stop_timestep=zero_proj,
+                    cond=obs_tokens,
+                    temporal_cond=temporal_cond,
+                    freq_mode=freq_mode,
+                )
+                ctm_target = self._ddim_jump_to(
+                    target_s, proj_target_out, s, zero_proj
+                )
+        else:
+            ctm_pred = pred_s
+            ctm_target = target_s
+
+        ctm_loss = self._huber_or_mse(
+            ctm_pred, ctm_target.detach(), self.distill_delta
+        )
+
+        # --- DSM loss (with configurable time sampling + SNR weighting) ---
+        dsm_t = self._sample_dsm_timesteps(B, device)
+        dsm_noise = torch.randn_like(x0)
+        x_t_dsm = self.noise_scheduler.add_noise(x0, dsm_noise, dsm_t)
+        zero = torch.zeros_like(dsm_t)
         student_x0_out = self.ctm_model(
-            x_t,
-            t,
-            stop_timestep=zero,
+            x_t_dsm, dsm_t, stop_timestep=zero,
             cond=obs_tokens,
             temporal_cond=temporal_cond,
             freq_mode=freq_mode,
         )
-        pred_x0 = self._ddim_jump_to(x_t, student_x0_out, t, zero)
-        dsm_loss = self._huber_or_mse(pred_x0, x0, self.distill_delta)
+        pred_x0 = self._ddim_jump_to(x_t_dsm, student_x0_out, dsm_t, zero)
+        # Note: soft-landing is NOT applied here because stop_time=0 always.
+        # With stop=0, beta_s/beta_t ≈ 0 so soft-landing would be a no-op anyway,
+        # but skipping it avoids unnecessary computation and potential edge cases.
+
+        if self.dsm_snr_weighting:
+            # SNR-based weighting (DDIM equivalent of Karras weighting)
+            snr_w = self._get_snr_weights(dsm_t, device)
+            dsm_diff = F.mse_loss(pred_x0, x0, reduction="none")
+            dsm_per_sample = reduce(dsm_diff, "b ... -> b (...)", "mean")
+            dsm_loss = (dsm_per_sample * snr_w.unsqueeze(-1)).mean()
+            if self.distill_delta > 0:
+                # Apply Huber smoothing on top of weighted loss
+                dsm_loss = (torch.sqrt(dsm_loss.square() + self.distill_delta ** 2)
+                            - self.distill_delta)
+        else:
+            dsm_loss = self._huber_or_mse(pred_x0, x0, self.distill_delta)
+
         total = self.ctm_loss_weight * ctm_loss + self.dsm_loss_weight * dsm_loss
         return total, ctm_loss.detach(), dsm_loss.detach()
 
@@ -497,7 +716,7 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         B = x0.shape[0]
         device = x0.device
         noise = torch.randn_like(x0)
-        t, _, _ = self._sample_t_u_s(B, device)
+        t = self._sample_dsm_timesteps(B, device)
         zero = torch.zeros_like(t)
         x_t = self.noise_scheduler.add_noise(x0, noise, t)
         student_out = self.ctm_model(
@@ -509,6 +728,17 @@ class DPMultiFreqPolicy(BaseImagePolicy):
             freq_mode=freq_mode,
         )
         pred_x0 = self._ddim_jump_to(x_t, student_out, t, zero)
+        # Note: soft-landing skipped for DSM (stop=0 always, would be no-op)
+
+        if self.dsm_snr_weighting:
+            snr_w = self._get_snr_weights(t, device)
+            dsm_diff = F.mse_loss(pred_x0, x0, reduction="none")
+            dsm_per_sample = reduce(dsm_diff, "b ... -> b (...)", "mean")
+            loss = (dsm_per_sample * snr_w.unsqueeze(-1)).mean()
+            if self.distill_delta > 0:
+                loss = (torch.sqrt(loss.square() + self.distill_delta ** 2)
+                        - self.distill_delta)
+            return loss
         return self._huber_or_mse(pred_x0, x0, self.distill_delta)
 
     def compute_loss(self, batch, loss_mask=None):
@@ -562,6 +792,27 @@ class DPMultiFreqPolicy(BaseImagePolicy):
             return total, metrics
 
         raise ValueError(f"Invalid training_stage={self.training_stage}")
+
+    def compute_val_loss_stage2(self, batch):
+        """Compute a meaningful validation loss for Stage 2.
+
+        Uses DSM-only loss (student predicts x0 vs ground truth) instead of
+        the full CTM loss which would compare EMA-model vs EMA-model (meaningless).
+        This is consistent with how consistency-policy validates.
+        """
+        obs_tokens, nactions_10, nactions_50, tc_10, tc_50 = self.model_forward(batch)
+        total = nactions_10.new_tensor(0.0)
+        if self.distill_freq in ("10hz", "both") or self.regularize_10hz_weight > 0:
+            dsm_10 = self._compute_ddim_dsm_loss_one_freq(
+                nactions_10, obs_tokens, tc_10, "10hz"
+            )
+            total = total + dsm_10
+        if self.distill_freq in ("50hz", "both"):
+            dsm_50 = self._compute_ddim_dsm_loss_one_freq(
+                nactions_50, obs_tokens, tc_50, "50hz"
+            )
+            total = total + dsm_50
+        return total
 
     def forward(self, batch, loss_mask=None):
         return self.compute_loss(batch, loss_mask)
@@ -880,21 +1131,24 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         if self.rnn_highfreq is not None:
             optim_groups += self.rnn_highfreq.get_optim_groups(weight_decay=weight_decay)
 
-        backbone_params = []
-        other_obs_params = []
-        for key, value in self.obs_encoder.named_parameters():
-            if key.startswith("key_model_map"):
-                backbone_params.append(value)
-            else:
-                other_obs_params.append(value)
-        optim_groups.append({
-            "params": backbone_params,
-            "weight_decay": obs_encoder_weight_decay,
-            "lr": obs_encoder_lr,
-        })
-        optim_groups.append({
-            "params": other_obs_params,
-            "weight_decay": obs_encoder_weight_decay,
-        })
+        # Stage 2: obs_encoder is frozen, skip adding its params to optimizer
+        # to save memory (no optimizer states needed for frozen params)
+        if self.training_stage == 1:
+            backbone_params = []
+            other_obs_params = []
+            for key, value in self.obs_encoder.named_parameters():
+                if key.startswith("key_model_map"):
+                    backbone_params.append(value)
+                else:
+                    other_obs_params.append(value)
+            optim_groups.append({
+                "params": backbone_params,
+                "weight_decay": obs_encoder_weight_decay,
+                "lr": obs_encoder_lr,
+            })
+            optim_groups.append({
+                "params": other_obs_params,
+                "weight_decay": obs_encoder_weight_decay,
+            })
 
         return torch.optim.AdamW(optim_groups, lr=lr, betas=betas)
