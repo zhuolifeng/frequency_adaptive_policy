@@ -247,11 +247,18 @@ class FMMultiFreqIMFPolicy(FMMultiFreqPolicy):
         # 5. Targets (stop gradient)
         v_target = v_true.detach()
 
-        # 6. Per-sample losses with adaptive weighting
-        loss_u = ((V - v_target) ** 2).sum(dim=(1, 2))
+        # 6. Per-sample losses with adaptive weighting.
+        # Keep raw MSE metrics for logging; the adaptive loss is often near
+        # a constant when norm_p=1.0.
+        sq_u = (V - v_target) ** 2
+        sq_v = (v_pred - v_target) ** 2
+        raw_loss_u = sq_u.mean(dim=(1, 2))
+        raw_loss_v = sq_v.mean(dim=(1, 2))
+
+        loss_u = sq_u.sum(dim=(1, 2))
         loss_u = self._adp_wt_fn(loss_u, self.norm_eps, self.norm_p)
 
-        loss_v = ((v_pred - v_target) ** 2).sum(dim=(1, 2))
+        loss_v = sq_v.sum(dim=(1, 2))
         loss_v = self._adp_wt_fn(loss_v, self.norm_eps, self.norm_p)
 
         loss = (loss_u + loss_v).mean()
@@ -259,6 +266,11 @@ class FMMultiFreqIMFPolicy(FMMultiFreqPolicy):
         loss_dict = {
             f"imf_loss_u_{freq_mode}": loss_u.mean().item(),
             f"imf_loss_v_{freq_mode}": loss_v.mean().item(),
+            f"raw_imf_loss_u_{freq_mode}": raw_loss_u.mean().item(),
+            f"raw_imf_loss_v_{freq_mode}": raw_loss_v.mean().item(),
+            f"raw_imf_loss_total_{freq_mode}": (
+                raw_loss_u.mean() + raw_loss_v.mean()
+            ).item(),
         }
 
         return loss, loss_dict
@@ -303,6 +315,10 @@ class FMMultiFreqIMFPolicy(FMMultiFreqPolicy):
             **dict_10,
             **dict_50,
         }
+        loss_dict["raw_total_loss"] = (
+            loss_dict["raw_imf_loss_total_10hz"]
+            + loss_dict["raw_imf_loss_total_50hz"]
+        )
 
         return total_loss, loss_dict
 

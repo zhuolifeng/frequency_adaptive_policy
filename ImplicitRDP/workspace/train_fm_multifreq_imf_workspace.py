@@ -246,7 +246,18 @@ class TrainFMMultiFreqIMFWorkspace(BaseWorkspace):
                             ema.step(accelerator.unwrap_model(self.model))
 
                         raw_loss_cpu = raw_loss.item()
-                        tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+                        postfix = {"loss": f"{raw_loss_cpu:.3f}"}
+                        if "raw_total_loss" in loss_dict:
+                            postfix["raw"] = f"{loss_dict['raw_total_loss']:.4f}"
+                        if "raw_imf_loss_total_10hz" in loss_dict:
+                            postfix["raw10"] = (
+                                f"{loss_dict['raw_imf_loss_total_10hz']:.4f}"
+                            )
+                        if "raw_imf_loss_total_50hz" in loss_dict:
+                            postfix["raw50"] = (
+                                f"{loss_dict['raw_imf_loss_total_50hz']:.4f}"
+                            )
+                        tepoch.set_postfix(postfix, refresh=False)
                         train_losses.append(raw_loss_cpu)
                         step_log = {
                             "train_loss": raw_loss_cpu,
