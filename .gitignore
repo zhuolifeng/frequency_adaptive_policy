@@ -149,3 +149,4 @@ implicitrdp_venv/
 consistency_models/
 consistency-policy
 imeanflow/
+*.mp4
