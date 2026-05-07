@@ -466,8 +466,12 @@ class TrainDPCTMMultiFreqWorkspace(BaseWorkspace):
 
                 # ========= Validation =========
                 policy = accelerator.unwrap_model(self.model)
-                if cfg.training.use_ema and self.ema_model is not None:
-                    policy = self.ema_model
+                if self.current_stage == 1:
+                    # Stage 1: use external EMA model (updated each step)
+                    if cfg.training.use_ema and self.ema_model is not None:
+                        policy = self.ema_model
+                # Stage 2: always use unwrapped model (ema_model is not
+                # updated during Stage 2, so using it gives stale results)
                 policy.eval()
 
                 if (self.epoch % cfg.training.val_every) == 0 and accelerator.is_main_process:
@@ -491,13 +495,21 @@ class TrainDPCTMMultiFreqWorkspace(BaseWorkspace):
                                 if (self.epoch % val_sample_every) == 0:
                                     obs_dict = batch["obs"]
                                     gt_action = batch[self.action_train_key]
+                                    # Stage 1: use EDM multi-step ODE for 50hz;
+                                    # Stage 2: use CTM single-step for 50hz
+                                    use_edm = (self.current_stage == 1)
                                     result = policy.predict_action(
                                         obs_dict,
                                         extended_obs_dict=batch.get("extended_obs", None),
+                                        use_edm_50hz=use_edm,
                                     )
                                     pred_action = result["action_pred"]
-                                    mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                                    val_mse_errors.append(mse.item())
+                                    # Only compute MSE on front 6 dims (pose)
+                                    # to avoid stiffness dims dominating
+                                    mse_pose = torch.nn.functional.mse_loss(
+                                        pred_action[..., :6], gt_action[..., :6]
+                                    )
+                                    val_mse_errors.append(mse_pose.item())
 
                                 if (
                                     cfg.training.max_val_steps is not None
@@ -515,13 +527,18 @@ class TrainDPCTMMultiFreqWorkspace(BaseWorkspace):
                     with torch.no_grad():
                         obs_dict = train_sampling_batch["obs"]
                         gt_action = train_sampling_batch[self.action_train_key]
+                        use_edm = (self.current_stage == 1)
                         result = policy.predict_action(
                             obs_dict,
                             extended_obs_dict=train_sampling_batch.get("extended_obs", None),
+                            use_edm_50hz=use_edm,
                         )
                         pred_action = result["action_pred"]
-                        mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                        step_log["train_action_mse_error"] = mse.item()
+                        # Only compute MSE on front 6 dims (pose)
+                        mse_pose = torch.nn.functional.mse_loss(
+                            pred_action[..., :6], gt_action[..., :6]
+                        )
+                        step_log["train_action_mse_error"] = mse_pose.item()
 
                 # ========= Epoch-level TensorBoard & Checkpoint =========
                 if accelerator.is_main_process:

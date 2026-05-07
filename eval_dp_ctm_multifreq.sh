@@ -47,19 +47,19 @@ DATASET_VERSION="${DATASET_VERSION:-v6.1}"
 ROUND="${ROUND:-1}"
 
 # Policy type: edm (Stage 1, multi-step ODE) or ctm (Stage 2, single-step CTM)
-POLICY_TYPE="${POLICY_TYPE:-edm}"
+POLICY_TYPE="${POLICY_TYPE:-ctm}"
 
 # Checkpoint path
-CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.05.05/14.36.41_train_dp_ctm_multifreq_workspace_dual_switch_v6_dp_ctm_multifreq/checkpoints/stage1_final.ckpt}"
+CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.05.05/14.36.41_train_dp_ctm_multifreq_workspace_dual_switch_v6_dp_ctm_multifreq/checkpoints/latest.ckpt}"
 
 # Dataset path
 DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
-GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
+GPU_DEVICE="${GPU_DEVICE:-cuda:1}"
 
 VIDEO_FPS="${VIDEO_FPS:-1}"
-NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-1}"
-USE_CHAINING="${USE_CHAINING:-0}"
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-5}"
+USE_CHAINING="${USE_CHAINING:-1}"
 EVAL_HEAD="${EVAL_HEAD:-both}"
 USE_FULL_DATASET="${USE_FULL_DATASET:-True}"
 

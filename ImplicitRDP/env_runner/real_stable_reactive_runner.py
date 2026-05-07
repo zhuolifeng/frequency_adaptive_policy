@@ -16,6 +16,7 @@ from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTrans
 from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
 from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
+from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
 from ImplicitRDP.env.real_bimanual.real_env import RealRobotEnvironment
@@ -530,7 +531,7 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy, DPCTMMultiFreqPolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:
@@ -674,7 +675,7 @@ class RealStableReactiveRunner:
                                 if self.use_reactive_transformer:
                                     with torch.no_grad():
                                         obs_tokens = policy.predict_obs_tokens(obs_dict)
-                                        noisy_trajectory = policy.sample_noisy_trajectory()
+                                        noisy_trajectory, reactive_head = policy.sample_noisy_trajectory()
                                     if update_tcp:
                                         tcp_obs_tokens = obs_tokens
                                         tcp_noisy_trajectory = noisy_trajectory
@@ -733,7 +734,8 @@ class RealStableReactiveRunner:
                                     obs_tokens_and_noisy_trajectory_list,
                                     extended_obs_dict_list,
                                     extended_obs_last_step_list,
-                                    dataset_obs_temporal_downsample_ratio
+                                    dataset_obs_temporal_downsample_ratio,
+                                    head=reactive_head,
                                 )
                             logger.debug(f"Policy inference time: {time.time() - slow_policy_time:.3f}s")
 

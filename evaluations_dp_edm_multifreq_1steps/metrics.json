@@ -7,12 +7,12 @@
   ],
   "use_chaining": false,
   "ckpt_path": "/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.05.05/14.36.41_train_dp_ctm_multifreq_workspace_dual_switch_v6_dp_ctm_multifreq/checkpoints/stage1_final.ckpt",
-  "overall_avg_inference_time_ms": 583.8216059978332,
+  "overall_avg_inference_time_ms": 584.7986749663635,
   "overall_mean_mse_10hz": 0.0011133580277808025,
   "overall_mean_mse_50hz": 3.678722049645739e-05,
   "episodes": {
     "0": {
-      "avg_inference_time_ms": 583.1277457326047,
+      "avg_inference_time_ms": 593.9384510642603,
       "mse_10hz": [
         0.001028640428557992,
         0.0009283961844630539,
@@ -515,7 +515,7 @@
       "mean_mse_50hz": 3.965708798602688e-05
     },
     "1": {
-      "avg_inference_time_ms": 579.6827600115821,
+      "avg_inference_time_ms": 579.9265918277558,
       "mse_10hz": [
         0.001301854383200407,
         0.0010433016577735543,
@@ -944,7 +944,7 @@
       "mean_mse_50hz": 3.519814221406358e-05
     },
     "2": {
-      "avg_inference_time_ms": 586.2320306209417,
+      "avg_inference_time_ms": 583.4729063969392,
       "mse_10hz": [
         0.0012322207912802696,
         0.0011500599794089794,
@@ -1369,7 +1369,7 @@
       "mean_mse_50hz": 3.116378865596604e-05
     },
     "3": {
-      "avg_inference_time_ms": 580.4275241765109,
+      "avg_inference_time_ms": 580.125186660073,
       "mse_10hz": [
         0.0012078627478331327,
         0.0010704115265980363,
@@ -1818,7 +1818,7 @@
       "mean_mse_50hz": 4.227882775260448e-05
     },
     "4": {
-      "avg_inference_time_ms": 591.808381287948,
+      "avg_inference_time_ms": 585.2306007598498,
       "mse_10hz": [
         0.0011018692748621106,
         0.0011725142830982804,

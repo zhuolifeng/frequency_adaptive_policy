@@ -10,6 +10,7 @@ from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTrans
 from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
 from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
+from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
 
@@ -88,6 +89,36 @@ def main(cfg):
         logger.info(f"FMMultiFreqConfidencePolicy: inference_head={policy.inference_head}, "
                     f"use_confidence={policy.use_confidence_based_head_selection}, "
                     f"threshold={policy.confidence_threshold_for_head_selection}")
+    elif isinstance(policy, DPCTMMultiFreqPolicy):
+        # DP-CTM Multi-Frequency policy
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        # Drop frozen teacher to save GPU memory
+        if hasattr(policy, 'drop_teacher'):
+            policy.drop_teacher()
+        # inference_head: "10hz" (multi-step Karras ODE) or "50hz" (CTM single-step)
+        inference_head = cfg.policy.get('inference_head', '50hz')
+        policy.inference_head = inference_head
+        # training_stage: 1=EDM, 2=CTM
+        training_stage = cfg.policy.get('training_stage', 2)
+        policy.set_training_stage(int(training_stage))
+        # 10hz inference steps (Karras ODE bins, default from yaml)
+        num_inference_steps = cfg.policy.get('num_inference_steps', None)
+        if num_inference_steps is not None:
+            policy.karras_scheduler.bins = int(num_inference_steps)
+            logger.info(f"DPCTMMultiFreqPolicy: karras_scheduler.bins -> {int(num_inference_steps)}")
+        # chaining for 50hz CTM head
+        use_chaining = cfg.policy.get('use_chaining', False)
+        if use_chaining and inference_head == '50hz':
+            policy.enable_chaining()
+            logger.info("DPCTMMultiFreqPolicy: chaining ENABLED for 50Hz CTM head")
+        else:
+            policy.disable_chaining()
+        logger.info(f"DPCTMMultiFreqPolicy: inference_head={inference_head}, "
+                    f"training_stage={training_stage}, chaining={use_chaining}")
     elif isinstance(policy, FMMultiFreqPolicy):
         # FM Multi-Freq policy (no confidence head)
         policy = workspace.model

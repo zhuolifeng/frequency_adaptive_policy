@@ -150,3 +150,4 @@ consistency_models/
 consistency-policy
 imeanflow/
 *.mp4
+metrics.json
