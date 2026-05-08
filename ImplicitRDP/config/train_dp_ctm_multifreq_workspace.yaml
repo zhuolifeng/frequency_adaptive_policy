@@ -114,6 +114,10 @@ policy:
   losses: [["ctm", "dsm"], [1, 1]]
   dsm_weights: "karras"
   chaining_times: ['D', 27, 54]
+  stage1_mse_weight_10hz: 1.0
+  stage1_mse_weight_50hz: 1.0
+  stage2_mse_weight_10hz: 1.0
+  stage2_mse_weight_50hz: 1.0
 
   training_stage: 1
   inference_head: "50hz"

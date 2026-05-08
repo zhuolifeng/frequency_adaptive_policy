@@ -72,6 +72,10 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
         losses: list = None,
         dsm_weights: str = "karras",
         chaining_times: list = None,
+        stage1_mse_weight_10hz: float = 1.0,
+        stage1_mse_weight_50hz: float = 1.0,
+        stage2_mse_weight_10hz: float = 1.0,
+        stage2_mse_weight_50hz: float = 1.0,
         # Stage control
         training_stage: int = 1,
         inference_head: str = "50hz",
@@ -161,6 +165,15 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
         self.dsm_weights = dsm_weights
         self.chaining_times = chaining_times
         self.chain = False
+        self.stage1_mse_weight_10hz = stage1_mse_weight_10hz
+        self.stage1_mse_weight_50hz = stage1_mse_weight_50hz
+        self.stage2_mse_weight_10hz = stage2_mse_weight_10hz
+        self.stage2_mse_weight_50hz = stage2_mse_weight_50hz
+
+        assert self.stage1_mse_weight_10hz >= 0.0
+        assert self.stage1_mse_weight_50hz >= 0.0
+        assert self.stage2_mse_weight_10hz >= 0.0
+        assert self.stage2_mse_weight_50hz >= 0.0
 
         self.losses = {}
         for loss_name, weight in zip(losses[0], losses[1]):
@@ -190,7 +203,9 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
             f"losses={self.losses}, dsm_weights={dsm_weights}, "
             f"ema_decay={initial_ema_decay}, "
             f"karras_bins={karras_scheduler.bins}, ctm_bins={ctm_scheduler.bins}, "
-            f"inference_head={inference_head})"
+            f"inference_head={inference_head}, "
+            f"stage1_mse_weights=({stage1_mse_weight_10hz}, {stage1_mse_weight_50hz}), "
+            f"stage2_mse_weights=({stage2_mse_weight_10hz}, {stage2_mse_weight_50hz}))"
         )
         logger.info("Transformer params: %e" % sum(p.numel() for p in self.model.parameters()))
         logger.info("Vision params: %e" % sum(p.numel() for p in self.obs_encoder.parameters()))
@@ -380,6 +395,10 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
 
         loss_10hz = nactions_10.new_tensor(0.0)
         loss_50hz = nactions_10.new_tensor(0.0)
+        edm_loss_10hz = nactions_10.new_tensor(0.0)
+        edm_loss_50hz = nactions_10.new_tensor(0.0)
+        mse_loss_10hz = nactions_10.new_tensor(0.0)
+        mse_loss_50hz = nactions_10.new_tensor(0.0)
 
         for trajectory, tc, freq in [
             (nactions_10, tc_10, "10hz"),
@@ -394,14 +413,29 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
             pred = self.karras_scheduler.calc_out(denoise, noisy_traj, times, clamp=False)
             # Karras weighting + Huber loss
             weights = self.karras_scheduler.get_weights(times, None, "karras")
-            loss = Huber_Loss(pred, trajectory, delta=self.delta, weights=weights)
+            edm_loss = Huber_Loss(pred, trajectory, delta=self.delta, weights=weights)
+            mse_loss = F.mse_loss(pred, trajectory)
             if freq == "10hz":
+                loss = edm_loss + self.stage1_mse_weight_10hz * mse_loss
                 loss_10hz = loss
+                edm_loss_10hz = edm_loss
+                mse_loss_10hz = mse_loss
             else:
+                loss = edm_loss + self.stage1_mse_weight_50hz * mse_loss
                 loss_50hz = loss
+                edm_loss_50hz = edm_loss
+                mse_loss_50hz = mse_loss
 
         total_loss = loss_10hz + loss_50hz
-        return total_loss, loss_10hz, loss_50hz
+        return (
+            total_loss,
+            loss_10hz,
+            loss_50hz,
+            edm_loss_10hz,
+            edm_loss_50hz,
+            mse_loss_10hz,
+            mse_loss_50hz,
+        )
 
     # ==================================================================
     # Stage 2: CTM distillation (50hz) + 10hz preservation
@@ -418,6 +452,7 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
         device = nactions_50.device
 
         obs_tokens, tc_10, tc_50 = self._encode_obs(batch, nobs, B)
+        pred_50_for_mse = None
 
         # ---- CTM loss (matches ctm_real_policy.py exactly) ----
         if "ctm" in self.losses:
@@ -503,11 +538,32 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
             pred = self.ctm_scheduler.CTM_calc_out(
                 student_ctm, noisy_traj, dsm_times, sigma_min, clamp=False
             )
+            pred_50_for_mse = pred
 
             loss_dsm = Huber_Loss(
                 pred, nactions_50, delta=self.delta, weights=dsm_weights
             )
             total_loss["dsm"] = loss_dsm * self.losses["dsm"]
+
+        if self.stage2_mse_weight_50hz > 0.0:
+            if pred_50_for_mse is None:
+                dsm_times, _ = self.ctm_scheduler.sample_times(
+                    nactions_50, time_sampler="ctm_dsm"
+                )
+                noisy_traj = self.ctm_scheduler.add_noise(nactions_50, dsm_times)
+                sigma_min = torch.tensor(
+                    [self.ctm_scheduler.time_min], device=device
+                ).expand(dsm_times.shape)
+                student_ctm = self._make_ctm_denoise(
+                    self.model, obs_tokens, tc_50, "50hz"
+                )
+                pred_50_for_mse = self.ctm_scheduler.CTM_calc_out(
+                    student_ctm, noisy_traj, dsm_times, sigma_min, clamp=False
+                )
+            total_loss["mse_50hz"] = (
+                self.stage2_mse_weight_50hz
+                * F.mse_loss(pred_50_for_mse, nactions_50)
+            )
 
         # ---- 10hz preservation loss (prevent backbone forgetting) ----
         nactions_10 = self.normalizer["action"].normalize(batch["action"])
@@ -524,6 +580,11 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
             pred_10, nactions_10, delta=self.delta, weights=weights_10
         )
         total_loss["preserve_10hz"] = loss_preserve
+        if self.stage2_mse_weight_10hz > 0.0:
+            total_loss["mse_10hz"] = (
+                self.stage2_mse_weight_10hz
+                * F.mse_loss(pred_10, nactions_10)
+            )
 
         return total_loss
 
@@ -532,11 +593,25 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
     # ==================================================================
     def compute_loss(self, batch, loss_mask=None):
         if self.training_stage == 1:
-            loss, loss_10hz, loss_50hz = self._compute_edm_loss(batch)
+            (
+                loss,
+                loss_10hz,
+                loss_50hz,
+                edm_loss_10hz,
+                edm_loss_50hz,
+                mse_loss_10hz,
+                mse_loss_50hz,
+            ) = self._compute_edm_loss(batch)
             return loss, {
-                "edm_loss": loss.item(),
-                "edm_loss_10hz": loss_10hz.item(),
-                "edm_loss_50hz": loss_50hz.item(),
+                "edm_loss": (edm_loss_10hz + edm_loss_50hz).item(),
+                "edm_loss_10hz": edm_loss_10hz.item(),
+                "edm_loss_50hz": edm_loss_50hz.item(),
+                "mse_loss": (mse_loss_10hz + mse_loss_50hz).item(),
+                "mse_loss_10hz": mse_loss_10hz.item(),
+                "mse_loss_50hz": mse_loss_50hz.item(),
+                "total_loss_10hz": loss_10hz.item(),
+                "total_loss_50hz": loss_50hz.item(),
+                "total_loss": loss.item(),
                 "training_stage": 1.0,
             }
         elif self.training_stage == 2:

@@ -8,7 +8,8 @@ ROUND="${ROUND:-1}"
 #   fm          -> train_fm_multifreq_workspace
 #   consistency -> train_fm_multifreq_consistency_workspace
 #   ctm         -> train_fm_multifreq_ctm_workspace
-POLICY_TYPE="${POLICY_TYPE:-ctm}"
+#   shortcut    -> train_fm_multifreq_shortcut_workspace
+POLICY_TYPE="${POLICY_TYPE:-shortcut}"
 if [ -z "${CONFIG_NAME}" ]; then
     case "${POLICY_TYPE}" in
         fm)
@@ -20,23 +21,28 @@ if [ -z "${CONFIG_NAME}" ]; then
         ctm)
             CONFIG_NAME="train_fm_multifreq_ctm_workspace"
             ;;
+        shortcut)
+            CONFIG_NAME="train_fm_multifreq_shortcut_workspace"
+            ;;
         *)
-            echo "Unsupported POLICY_TYPE=${POLICY_TYPE}. Use fm, consistency, or ctm."
+            echo "Unsupported POLICY_TYPE=${POLICY_TYPE}. Use fm, consistency, ctm, or shortcut."
             exit 1
             ;;
     esac
 fi
 
 # Checkpoint path. Override with CKPT_PATH=/path/to/checkpoint.ckpt.
-CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.04.30/17.43.24_train_fm_multifreq_ctm_workspace_dual_switch_v6_fm_multifreq_ctm/checkpoints/ctm_final.ckpt}"
+CKPT_PATH="${CKPT_PATH:-/mnt/workspace/users/lifeng/frequency_adaptive_policy_flow/data/outputs/2026.05.08/15.49.50_train_fm_multifreq_shortcut_workspace_dual_switch_v6_fm_multifreq_shortcut/checkpoints}"
 
 # Dataset path. Override with DATASET_PATH=/path/to/zarr.
-DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+DATASET_PATH="${DATASET_PATH:-/mnt/workspace/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
 GPU_DEVICE="${GPU_DEVICE:-cuda:6}"
 
 VIDEO_FPS="${VIDEO_FPS:-1}"
 NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-1}"
+NUM_INFERENCE_STEPS_10HZ="${NUM_INFERENCE_STEPS_10HZ:-10}"
+SHORTCUT_VERSION="${SHORTCUT_VERSION:-new}"
 USE_DISTILLATION="${USE_DISTILLATION:-True}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-evaluations_fm_multifreq_ctm_1steps}"
@@ -50,6 +56,8 @@ echo "Checkpoint: ${CKPT_PATH}"
 echo "Dataset:    ${DATASET_PATH}"
 echo "GPU device: ${GPU_DEVICE}"
 echo "Inference steps: ${NUM_INFERENCE_STEPS}"
+echo "10Hz steps: ${NUM_INFERENCE_STEPS_10HZ}"
+echo "Shortcut version: ${SHORTCUT_VERSION}"
 echo "Use distillation: ${USE_DISTILLATION}"
 echo "Video FPS:  ${VIDEO_FPS}"
 echo "Output dir: ${OUTPUT_DIR}"
@@ -64,11 +72,16 @@ ARGS=(
     "task.dataset_path=${DATASET_PATH}"
     "+use_full_dataset=True"
     "+num_inference_steps=${NUM_INFERENCE_STEPS}"
+    "+num_inference_steps_10hz=${NUM_INFERENCE_STEPS_10HZ}"
     "+video_fps=${VIDEO_FPS}"
     "+device=${GPU_DEVICE}"
     "task.dataset.val_ratio=0.0"
     "policy.obs_encoder.transforms=[{type: CenterCrop}]"
 )
+
+if [ "${CONFIG_NAME}" = "train_fm_multifreq_shortcut_workspace" ]; then
+    ARGS+=("policy.shortcut_version=${SHORTCUT_VERSION}")
+fi
 
 if [ "${CONFIG_NAME}" = "train_fm_multifreq_workspace" ]; then
     ARGS+=("+use_distillation=${USE_DISTILLATION}")

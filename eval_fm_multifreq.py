@@ -15,6 +15,7 @@ from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_consistency_policy import FMMultiFreqConsistencyPolicy
 from ImplicitRDP.policy.fm_multifreq_ctm_policy import FMMultiFreqCTMPolicy
+from ImplicitRDP.policy.fm_multifreq_shortcut_policy import FMMultiFreqShortcutPolicy
 from ImplicitRDP.dataset.base_dataset import BaseImageDataset
 from ImplicitRDP.common.pytorch_util import dict_apply
 
@@ -165,11 +166,13 @@ def main(cfg):
         FMMultiFreqPolicy,
         FMMultiFreqConsistencyPolicy,
         FMMultiFreqCTMPolicy,
+        FMMultiFreqShortcutPolicy,
     )
     if not isinstance(policy, supported_policy_types):
         raise ValueError(
             "Expected FMMultiFreqPolicy, FMMultiFreqConsistencyPolicy, "
-            f"or FMMultiFreqCTMPolicy, got {type(policy)}"
+            "FMMultiFreqCTMPolicy, or FMMultiFreqShortcutPolicy, "
+            f"got {type(policy)}"
         )
 
     configured_training_stage = cfg.get('training_stage', None)
@@ -185,6 +188,15 @@ def main(cfg):
         original_inference_steps = getattr(policy, 'num_inference_steps', None)
         policy.num_inference_steps = int(configured_inference_steps)
         logger.info(f"Override policy.num_inference_steps: {original_inference_steps} -> {policy.num_inference_steps}")
+
+    configured_inference_steps_10hz = cfg.get('num_inference_steps_10hz', None)
+    if configured_inference_steps_10hz is not None and hasattr(policy, 'num_inference_steps_10hz'):
+        original_inference_steps_10hz = getattr(policy, 'num_inference_steps_10hz', None)
+        policy.num_inference_steps_10hz = int(configured_inference_steps_10hz)
+        logger.info(
+            "Override policy.num_inference_steps_10hz: "
+            f"{original_inference_steps_10hz} -> {policy.num_inference_steps_10hz}"
+        )
 
     configured_use_distillation = cfg.get('use_distillation', None)
     if configured_use_distillation is not None and hasattr(policy, 'use_distillation'):
