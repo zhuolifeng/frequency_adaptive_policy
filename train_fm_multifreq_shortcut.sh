@@ -21,6 +21,7 @@ NUM_INFERENCE_STEPS_10HZ="${NUM_INFERENCE_STEPS_10HZ:-10}"
 SHORTCUT_DENOISE_STEPS="${SHORTCUT_DENOISE_STEPS:-128}"
 SHORTCUT_BOOTSTRAP_EVERY="${SHORTCUT_BOOTSTRAP_EVERY:-8}"
 SHORTCUT_VERSION="${SHORTCUT_VERSION:-new}"
+LOG_BACKEND="${LOG_BACKEND:-tensorboard}"
 WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_PROJECT="${WANDB_PROJECT:-fm_multifreq_shortcut_policy}"
 WANDB_NAME="${WANDB_NAME:-}"
@@ -36,7 +37,8 @@ echo "  50Hz inference steps: ${NUM_INFERENCE_STEPS}"
 echo "  10Hz inference steps: ${NUM_INFERENCE_STEPS_10HZ}"
 echo "  Shortcut denoise steps: ${SHORTCUT_DENOISE_STEPS}"
 echo "  Shortcut version: ${SHORTCUT_VERSION}"
-echo "  W&B project/mode: ${WANDB_PROJECT}/${WANDB_MODE}"
+echo "  Log backend: ${LOG_BACKEND}"
+echo "  Project/mode: ${WANDB_PROJECT}/${WANDB_MODE}"
 echo "=========================================="
 
 POLICY_TASK_NAME="${TASK}_${DATASET_VERSION}_fm_multifreq_shortcut"
@@ -57,6 +59,7 @@ ARGS=(
     training.amp_dtype=${AMP_DTYPE_FOR_POLICY}
     training.debug=${TRAINING_DEBUG}
     optimizer.lr=${POLICY_LR}
+    logging.backend=${LOG_BACKEND}
     logging.project=${WANDB_PROJECT}
     logging.mode=${WANDB_MODE}
 )
