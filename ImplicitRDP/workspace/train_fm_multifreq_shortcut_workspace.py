@@ -105,10 +105,7 @@ class TrainFMMultiFreqShortcutWorkspace(BaseWorkspace):
                 init_kwargs={"wandb": wandb_cfg},
             )
         elif log_backend == "tensorboard":
-            accelerator.init_trackers(
-                project_name=cfg.logging.project,
-                config=OmegaConf.to_container(cfg, resolve=True),
-            )
+            accelerator.init_trackers(project_name=cfg.logging.project)
 
         if cfg.training.resume:
             assert cfg.training.pretrained_ckpt_path is None

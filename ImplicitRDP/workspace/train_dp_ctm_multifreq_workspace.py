@@ -365,6 +365,10 @@ class TrainDPCTMMultiFreqWorkspace(BaseWorkspace):
                 preserve_losses = []
                 edm_10hz_losses = []
                 edm_50hz_losses = []
+                mse_10hz_losses = []
+                mse_50hz_losses = []
+                stage2_mse_10hz_losses = []
+                stage2_mse_50hz_losses = []
 
                 with tqdm.tqdm(
                     train_dataloader,
@@ -427,6 +431,14 @@ class TrainDPCTMMultiFreqWorkspace(BaseWorkspace):
                             edm_10hz_losses.append(loss_dict["edm_loss_10hz"])
                         if "edm_loss_50hz" in loss_dict:
                             edm_50hz_losses.append(loss_dict["edm_loss_50hz"])
+                        if "mse_loss_10hz" in loss_dict:
+                            mse_10hz_losses.append(loss_dict["mse_loss_10hz"])
+                        if "mse_loss_50hz" in loss_dict:
+                            mse_50hz_losses.append(loss_dict["mse_loss_50hz"])
+                        if "mse_10hz" in loss_dict:
+                            stage2_mse_10hz_losses.append(loss_dict["mse_10hz"])
+                        if "mse_50hz" in loss_dict:
+                            stage2_mse_50hz_losses.append(loss_dict["mse_50hz"])
 
                         step_log = {
                             "train_loss": raw_loss_cpu,
@@ -463,6 +475,14 @@ class TrainDPCTMMultiFreqWorkspace(BaseWorkspace):
                     step_log["edm_loss_10hz"] = np.mean(edm_10hz_losses)
                 if len(edm_50hz_losses) > 0:
                     step_log["edm_loss_50hz"] = np.mean(edm_50hz_losses)
+                if len(mse_10hz_losses) > 0:
+                    step_log["mse_loss_10hz"] = np.mean(mse_10hz_losses)
+                if len(mse_50hz_losses) > 0:
+                    step_log["mse_loss_50hz"] = np.mean(mse_50hz_losses)
+                if len(stage2_mse_10hz_losses) > 0:
+                    step_log["mse_10hz"] = np.mean(stage2_mse_10hz_losses)
+                if len(stage2_mse_50hz_losses) > 0:
+                    step_log["mse_50hz"] = np.mean(stage2_mse_50hz_losses)
 
                 # ========= Validation =========
                 policy = accelerator.unwrap_model(self.model)
@@ -554,12 +574,20 @@ class TrainDPCTMMultiFreqWorkspace(BaseWorkspace):
                             writer.add_scalar('train/dsm_loss', step_log['dsm'], self.epoch)
                         if 'preserve_10hz' in step_log:
                             writer.add_scalar('train/preserve_10hz_loss', step_log['preserve_10hz'], self.epoch)
+                        if 'mse_10hz' in step_log:
+                            writer.add_scalar('train/mse_10hz_loss', step_log['mse_10hz'], self.epoch)
+                        if 'mse_50hz' in step_log:
+                            writer.add_scalar('train/mse_50hz_loss', step_log['mse_50hz'], self.epoch)
 
                         # -- Stage 1 sub-losses --
                         if 'edm_loss_10hz' in step_log:
                             writer.add_scalar('train/edm_loss_10hz', step_log['edm_loss_10hz'], self.epoch)
                         if 'edm_loss_50hz' in step_log:
                             writer.add_scalar('train/edm_loss_50hz', step_log['edm_loss_50hz'], self.epoch)
+                        if 'mse_loss_10hz' in step_log:
+                            writer.add_scalar('train/mse_loss_10hz', step_log['mse_loss_10hz'], self.epoch)
+                        if 'mse_loss_50hz' in step_log:
+                            writer.add_scalar('train/mse_loss_50hz', step_log['mse_loss_50hz'], self.epoch)
 
                         # -- Validation --
                         if 'val_loss' in step_log:

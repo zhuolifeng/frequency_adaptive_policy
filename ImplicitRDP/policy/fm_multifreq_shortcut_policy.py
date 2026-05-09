@@ -47,6 +47,7 @@ class FMMultiFreqShortcutPolicy(FMMultiFreqPolicy):
         fm_10hz_weight: float = 1.0,
         fm_50hz_weight: float = 1.0,
         shortcut_50hz_weight: float = 1.0,
+        shortcut_one_step_50hz_weight: float = 1.0,
         shortcut_use_ema_target: bool = True,
         num_inference_steps_10hz: int = 10,
         shortcut_version: str = "new",
@@ -93,6 +94,7 @@ class FMMultiFreqShortcutPolicy(FMMultiFreqPolicy):
         self.fm_10hz_weight = fm_10hz_weight
         self.fm_50hz_weight = fm_50hz_weight
         self.shortcut_50hz_weight = shortcut_50hz_weight
+        self.shortcut_one_step_50hz_weight = shortcut_one_step_50hz_weight
         self.shortcut_use_ema_target = shortcut_use_ema_target
         self.num_inference_steps_10hz = num_inference_steps_10hz
         self.shortcut_version = shortcut_version
@@ -342,6 +344,81 @@ class FMMultiFreqShortcutPolicy(FMMultiFreqPolicy):
             None if loss_mask is None else loss_mask[:bootstrap_size],
         )
 
+    def _compute_shortcut_one_step_loss_50hz(
+        self,
+        trajectory: torch.Tensor,
+        obs_tokens: torch.Tensor,
+        temporal_cond: torch.Tensor,
+        loss_mask=None,
+    ):
+        B = trajectory.shape[0]
+        device = trajectory.device
+        bootstrap_size = max(1, B // self.shortcut_bootstrap_every)
+        bootstrap_size = min(bootstrap_size, B)
+
+        x0 = trajectory[:bootstrap_size]
+        obs_b = obs_tokens[:bootstrap_size]
+        temporal_b = None if temporal_cond is None else temporal_cond[:bootstrap_size]
+
+        dt_base = torch.zeros(bootstrap_size, dtype=torch.float32, device=device)
+        delta = torch.ones_like(dt_base)
+        t = torch.ones(bootstrap_size, dtype=torch.float32, device=device)
+        noise = torch.randn_like(x0)
+        x_t = t.view(bootstrap_size, 1, 1) * noise + (1.0 - t.view(bootstrap_size, 1, 1)) * x0
+
+        t_step = (t * 1000).long()
+        half_dt_base = dt_base + 1.0
+        half_delta = delta * 0.5
+        t_mid = (t - half_delta).clamp_min(0.0)
+        t_mid_step = (t_mid * 1000).long()
+
+        target_model = self.model
+        if self.shortcut_use_ema_target and self.ema_model_ref is not None:
+            target_model = self.ema_model_ref
+
+        target_was_training = target_model.training
+        target_model.eval()
+        try:
+            with torch.no_grad():
+                v1 = self._model_call(
+                    target_model,
+                    x_t,
+                    t_step,
+                    half_dt_base,
+                    obs_b,
+                    temporal_b,
+                    "50hz",
+                )
+                x_mid = x_t - half_delta.view(bootstrap_size, 1, 1) * v1
+                v2 = self._model_call(
+                    target_model,
+                    x_mid,
+                    t_mid_step,
+                    half_dt_base,
+                    obs_b,
+                    temporal_b,
+                    "50hz",
+                )
+                target = 0.5 * (v1 + v2)
+        finally:
+            target_model.train(target_was_training)
+
+        pred = self._model_call(
+            self.model,
+            x_t,
+            t_step,
+            dt_base,
+            obs_b,
+            temporal_b,
+            "50hz",
+        )
+        loss_all = F.mse_loss(pred, target.detach(), reduction="none")
+        loss_per = reduce(loss_all, "b ... -> b (...)", "mean")
+        return self._mean_loss(
+            loss_per,
+            None if loss_mask is None else loss_mask[:bootstrap_size],
+        )
+
     def _compute_shortcut_merged_loss_50hz(
         self,
         trajectory: torch.Tensor,
@@ -425,15 +502,20 @@ class FMMultiFreqShortcutPolicy(FMMultiFreqPolicy):
             shortcut_50 = self._compute_shortcut_loss_50hz(
                 nactions_50, obs_tokens, tc_50, loss_mask
             )
+            shortcut_50_one_step = self._compute_shortcut_one_step_loss_50hz(
+                nactions_50, obs_tokens, tc_50, loss_mask
+            )
             total = (
                 self.fm_10hz_weight * loss_10
                 + self.fm_50hz_weight * loss_50
                 + self.shortcut_50hz_weight * shortcut_50
+                + self.shortcut_one_step_50hz_weight * shortcut_50_one_step
             )
             return total, {
                 "fm_loss_10hz": loss_10.item(),
                 "fm_loss_50hz": loss_50.item(),
                 "shortcut_loss_50hz": shortcut_50.item(),
+                "shortcut_loss_50hz_one_step": shortcut_50_one_step.item(),
                 "total_loss": total.item(),
                 "training_stage": 1.0,
             }

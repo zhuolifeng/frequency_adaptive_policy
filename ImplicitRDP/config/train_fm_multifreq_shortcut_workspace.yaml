@@ -95,6 +95,7 @@ policy:
   fm_10hz_weight: 1.0
   fm_50hz_weight: 1.0
   shortcut_50hz_weight: 1.0
+  shortcut_one_step_50hz_weight: 1.0
   shortcut_use_ema_target: True
 
 ema:
