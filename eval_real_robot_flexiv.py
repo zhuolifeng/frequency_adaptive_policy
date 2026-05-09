@@ -99,26 +99,23 @@ def main(cfg):
         # Drop frozen teacher to save GPU memory
         if hasattr(policy, 'drop_teacher'):
             policy.drop_teacher()
-        # inference_head: "10hz" (multi-step Karras ODE) or "50hz" (CTM single-step)
+        # inference_head: "10hz" (multi-step Karras ODE) or "50hz" (CTM single/multi-step)
         inference_head = cfg.policy.get('inference_head', '50hz')
         policy.inference_head = inference_head
         # training_stage: 1=EDM, 2=CTM
         training_stage = cfg.policy.get('training_stage', 2)
         policy.set_training_stage(int(training_stage))
-        # 10hz inference steps (Karras ODE bins, default from yaml)
+        # 10hz inference steps (Karras ODE bins)
         num_inference_steps = cfg.policy.get('num_inference_steps', None)
         if num_inference_steps is not None:
             policy.karras_scheduler.bins = int(num_inference_steps)
             logger.info(f"DPCTMMultiFreqPolicy: karras_scheduler.bins -> {int(num_inference_steps)}")
-        # chaining for 50hz CTM head
-        use_chaining = cfg.policy.get('use_chaining', False)
-        if use_chaining and inference_head == '50hz':
-            policy.enable_chaining()
-            logger.info("DPCTMMultiFreqPolicy: chaining ENABLED for 50Hz CTM head")
-        else:
-            policy.disable_chaining()
+        # 50hz inference steps: 1=single-step CTM, >1=native CTM multi-step
+        num_inference_steps_50hz = cfg.policy.get('num_inference_steps_50hz', 1)
+        policy.num_inference_steps_50hz = int(num_inference_steps_50hz)
         logger.info(f"DPCTMMultiFreqPolicy: inference_head={inference_head}, "
-                    f"training_stage={training_stage}, chaining={use_chaining}")
+                    f"training_stage={training_stage}, "
+                    f"num_inference_steps_50hz={num_inference_steps_50hz}")
     elif isinstance(policy, FMMultiFreqPolicy):
         # FM Multi-Freq policy (no confidence head)
         policy = workspace.model

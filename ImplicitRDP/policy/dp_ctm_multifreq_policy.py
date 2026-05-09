@@ -703,18 +703,29 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
         return trajectory
 
     # ==================================================================
-    # Inference: 50hz single-step CTM (with optional chaining)
+    # Inference: 50hz CTM (single-step or native multi-step)
     # ==================================================================
     def consistency_sample_50hz(
         self,
         obs_tokens,
         temporal_cond,
         generator=None,
+        num_inference_steps=None,
     ):
-        """Single-step CTM for 50hz (matches CTM inference)."""
+        """CTM inference for 50hz.
+
+        When num_inference_steps <= 1 (default): single-step  sigma_max -> sigma_min.
+        When num_inference_steps > 1: native CTM multi-step, splitting
+        [sigma_max, sigma_min] into equal segments along the Karras schedule
+        and jumping deterministically via G_theta(x, t -> s).
+
+        Unlike chaining, NO noise is re-injected between steps.
+        """
         B = obs_tokens.shape[0]
         device = obs_tokens.device
         dtype = obs_tokens.dtype
+
+        n_steps = num_inference_steps if num_inference_steps is not None else 1
 
         cond_data = torch.zeros(
             B, self.horizon_50hz, self.action_dim, device=device, dtype=dtype
@@ -723,9 +734,6 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
             cond_data, generator=generator
         )
 
-        sigma_max = torch.tensor(
-            [self.ctm_scheduler.time_max], device=device
-        )
         sigma_min = torch.tensor(
             [self.ctm_scheduler.time_min], device=device
         )
@@ -733,22 +741,37 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
         ctm_denoise = self._make_ctm_denoise(
             self.model, obs_tokens, temporal_cond, "50hz"
         )
-        out = self.ctm_scheduler.CTM_calc_out(
-            ctm_denoise, trajectory, sigma_max, sigma_min, clamp=True
-        )
 
-        if not self.chain:
-            return out
-
-        # Chaining: re-noise and refine
-        for t_val in self.chaining_times[1:]:
-            sigma_chain = torch.tensor([float(t_val)], device=device)
-            if self.chaining_times[0] == "C":
-                sigma_chain = self.ctm_scheduler.timesteps_to_times(sigma_chain)
-            noisy = self.ctm_scheduler.add_noise(out, sigma_chain)
-            out = self.ctm_scheduler.CTM_calc_out(
-                ctm_denoise, noisy, sigma_chain, sigma_min, clamp=True
+        if n_steps <= 1:
+            # Single-step: sigma_max -> sigma_min
+            sigma_max = torch.tensor(
+                [self.ctm_scheduler.time_max], device=device
             )
+            out = self.ctm_scheduler.CTM_calc_out(
+                ctm_denoise, trajectory, sigma_max, sigma_min, clamp=True
+            )
+        else:
+            # Native CTM multi-step: split sigma schedule into n_steps segments
+            # Use Karras schedule: sigma_i = (sigma_max^(1/rho) + i/(n-1) * (sigma_min^(1/rho) - sigma_max^(1/rho)))^rho
+            rho = self.ctm_scheduler.rho
+            s_max = self.ctm_scheduler.time_max
+            s_min = self.ctm_scheduler.time_min
+            sigmas = []
+            for i in range(n_steps + 1):
+                sigma_i = (
+                    s_max ** (1.0 / rho)
+                    + i / n_steps * (s_min ** (1.0 / rho) - s_max ** (1.0 / rho))
+                ) ** rho
+                sigmas.append(max(sigma_i, s_min))
+            # sigmas: [sigma_max, ..., sigma_min]  (n_steps+1 values)
+
+            out = trajectory
+            for i in range(n_steps):
+                t_cur = torch.tensor([sigmas[i]], device=device)
+                t_next = torch.tensor([sigmas[i + 1]], device=device)
+                out = self.ctm_scheduler.CTM_calc_out(
+                    ctm_denoise, out, t_cur, t_next, clamp=True
+                )
 
         return out
 
@@ -783,7 +806,7 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
                 obs_tokens, temporal_cond_10hz
             )
 
-        # 50hz: CTM single-step (default) or EDM multi-step ODE (for Stage-1 ckpt)
+        # 50hz: CTM (single/multi-step) or EDM multi-step ODE (for Stage-1 ckpt)
         with torch.no_grad():
             if use_edm_50hz:
                 nsample_50 = self.conditional_sample_50hz(
@@ -792,7 +815,8 @@ class DPCTMMultiFreqPolicy(BaseImagePolicy):
                 )
             else:
                 nsample_50 = self.consistency_sample_50hz(
-                    obs_tokens, temporal_cond_50hz
+                    obs_tokens, temporal_cond_50hz,
+                    num_inference_steps=num_inference_steps,
                 )
 
         # Unnormalize

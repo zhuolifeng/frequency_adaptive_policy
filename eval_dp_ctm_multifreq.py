@@ -7,10 +7,11 @@ and generates action chunk comparison videos + MSE visualization videos.
 
 Supports two checkpoint types:
   - EDM (Stage 1):  Both 10Hz and 50Hz use multi-step Karras Heun ODE
-  - CTM (Stage 2):  10Hz uses Karras Heun ODE, 50Hz uses single-step CTM
+  - CTM (Stage 2):  10Hz uses Karras Heun ODE, 50Hz uses CTM
+                     (single-step when steps=1, native multi-step when steps>1)
 
 Usage:
-    # Evaluate CTM checkpoint (default, Stage 2)
+    # Evaluate CTM checkpoint (default, Stage 2, single-step 50Hz)
     CKPT_PATH=/path/to/ctm.ckpt python eval_dp_ctm_multifreq.py \
         task.dataset.dataset_path=/path/to/zarr_folder
 
@@ -18,16 +19,15 @@ Usage:
     POLICY_TYPE=edm CKPT_PATH=/path/to/edm.ckpt python eval_dp_ctm_multifreq.py \
         task.dataset.dataset_path=/path/to/zarr_folder
 
-    # CTM with chaining (50Hz multi-step refinement)
-    USE_CHAINING=1 CKPT_PATH=/path/to/ctm.ckpt python eval_dp_ctm_multifreq.py \
-        task.dataset.dataset_path=/path/to/zarr_folder
+    # CTM with native multi-step (50Hz 2-step)
+    CKPT_PATH=/path/to/ctm.ckpt python eval_dp_ctm_multifreq.py \
+        task.dataset.dataset_path=/path/to/zarr_folder +num_inference_steps_50hz=2
 
     Optional env vars:
         CKPT_PATH          (required) Path to checkpoint .ckpt file
         POLICY_TYPE=edm|ctm (default: ctm) EDM uses multi-step ODE for 50Hz
         OUTPUT_DIR          (optional) Override output directory
         EVAL_HEAD=10hz|50hz|both  (default: both) Which head(s) to evaluate
-        USE_CHAINING=0|1    (default: 0) Enable CTM chaining for 50Hz (ctm only)
         MAX_EPISODES        (default: all) Maximum number of episodes to evaluate
 """
 if __name__ == "__main__":
@@ -197,7 +197,7 @@ def compute_mse(gt, pred, n_dims=6):
 # Policy loading
 # ====================================================================
 
-def load_policy(cfg, ckpt_path, use_chaining=False):
+def load_policy(cfg, ckpt_path):
     """Load DP-CTM MultiFreq policy from checkpoint.
 
     Uses the same workspace-based loading as training, which ensures
@@ -225,13 +225,6 @@ def load_policy(cfg, ckpt_path, use_chaining=False):
     if hasattr(policy, 'drop_teacher'):
         policy.drop_teacher()
 
-    # Enable chaining for 50Hz CTM head
-    if use_chaining and hasattr(policy, 'enable_chaining'):
-        policy.enable_chaining()
-        print("  Chaining ENABLED for 50Hz CTM head")
-    else:
-        print("  Chaining DISABLED for 50Hz CTM head")
-
     return policy
 
 
@@ -257,11 +250,10 @@ def main(cfg):
     eval_head = os.environ.get('EVAL_HEAD', 'both').lower()
     assert eval_head in ('10hz', '50hz', 'both'), f"EVAL_HEAD must be 10hz, 50hz, or both. Got: {eval_head}"
 
-    use_chaining = os.environ.get('USE_CHAINING', '0') == '1'
-    if use_edm_50hz and use_chaining:
-        print("  WARNING: Chaining is ignored for EDM (Stage 1) checkpoints")
-        use_chaining = False
     max_episodes_env = os.environ.get('MAX_EPISODES')
+
+    # 50Hz inference steps: from hydra cfg (+num_inference_steps_50hz=N)
+    num_inference_steps_50hz = int(cfg.get('num_inference_steps_50hz', 1))
 
     # video_fps and output_dir: prefer hydra cfg, fall back to env var
     video_fps_cfg = cfg.get('video_fps', None)
@@ -270,22 +262,30 @@ def main(cfg):
     if output_dir:
         output_dir = pathlib.Path(output_dir)
     else:
-        chaining_suffix = "_chained" if use_chaining else ""
-        output_dir = pathlib.Path(ckpt_path).parent / f"evaluation_dp_ctm_multifreq_{policy_type}{chaining_suffix}"
+        steps_suffix = f"_50hz{num_inference_steps_50hz}steps"
+        output_dir = pathlib.Path(ckpt_path).parent / f"evaluation_dp_ctm_multifreq_{policy_type}{steps_suffix}"
     output_dir.mkdir(exist_ok=True, parents=True)
+
+    # Determine 50Hz mode description
+    if use_edm_50hz:
+        mode_50hz_desc = f"EDM multi-step ODE ({num_inference_steps_50hz} steps)"
+    elif num_inference_steps_50hz <= 1:
+        mode_50hz_desc = "CTM single-step"
+    else:
+        mode_50hz_desc = f"CTM native multi-step ({num_inference_steps_50hz} steps)"
 
     print("=" * 70)
     print(" DP-CTM Multi-Frequency Policy Offline Evaluation")
     print("=" * 70)
     print(f"  Checkpoint:       {ckpt_path}")
-    print(f"  Policy type:      {policy_type.upper()} ({'multi-step ODE' if use_edm_50hz else 'CTM single-step'} for 50Hz)")
+    print(f"  Policy type:      {policy_type.upper()} ({mode_50hz_desc} for 50Hz)")
     print(f"  Eval head(s):     {eval_head}")
-    print(f"  Chaining (50Hz):  {'ON' if use_chaining else 'OFF'}")
+    print(f"  50Hz steps:       {num_inference_steps_50hz}")
     print(f"  Use full dataset: {cfg.get('use_full_dataset', False)}")
     print(f"  Output:           {output_dir}")
 
     # ---- Load policy ----
-    policy = load_policy(cfg, ckpt_path, use_chaining=use_chaining)
+    policy = load_policy(cfg, ckpt_path)
 
     # Override training_stage from hydra config (e.g. +training_stage=2)
     # Default: stage 1 for EDM, stage 2 for CTM
@@ -438,6 +438,7 @@ def main(cfg):
                     obs_dict,
                     extended_obs_dict=extended_obs_dict,
                     use_edm_50hz=use_edm_50hz,
+                    num_inference_steps=num_inference_steps_50hz,
                 )
                 if device.type == 'cuda':
                     torch.cuda.synchronize()
@@ -620,7 +621,7 @@ def main(cfg):
         'policy_type': f'dp_ctm_multifreq_{policy_type}',
         'checkpoint_stage': 'edm' if use_edm_50hz else 'ctm',
         'eval_heads': heads_to_eval,
-        'use_chaining': use_chaining,
+        'num_inference_steps_50hz': num_inference_steps_50hz,
         'ckpt_path': str(ckpt_path),
         'overall_avg_inference_time_ms': float(overall_time),
         **overall_metrics,
@@ -646,7 +647,7 @@ def main(cfg):
               f"Avg Time = {metrics['avg_inference_time_ms']:.1f}ms")
 
     print(f"\n  Evaluated heads:        {heads_to_eval}")
-    print(f"  Chaining (50Hz):        {'ON' if use_chaining else 'OFF'}")
+    print(f"  50Hz steps:             {num_inference_steps_50hz}")
     for head in heads_to_eval:
         key = f'overall_mean_mse_{head}'
         print(f"  Overall Mean MSE ({head}): {overall_metrics.get(key, 0):.6f}")

@@ -86,7 +86,6 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   obs_temporal_downsample_ratio: 1
   downsample_extended_obs: False
-  use_fast_buffer: True
   task_name: ${task_name}
   transform_params: ${task.transforms}
   shape_meta: ${task.shape_meta}

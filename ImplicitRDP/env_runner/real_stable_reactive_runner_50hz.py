@@ -16,6 +16,7 @@ from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTrans
 from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
 from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
+from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
 from ImplicitRDP.env.real_bimanual.real_env import RealRobotEnvironment
@@ -87,7 +88,7 @@ class RealStableReactiveRunner:
                  tcp_rot_clip_range: ListConfig = ListConfig([[-np.pi, 0., np.pi], [-np.pi, 0., np.pi]]),
                  tqdm_interval_sec=5.0,
                  control_fps: float = 50,
-                 latency_step: int = 0,
+                 latency_step: int = 10,
                  gripper_latency_step: Optional[int] = None,
                  n_obs_steps: int = 2,
                  obs_temporal_downsample_ratio: int = 2,
@@ -552,7 +553,7 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy, DPCTMMultiFreqPolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:
@@ -700,7 +701,13 @@ class RealStableReactiveRunner:
                                         obs_tokens = policy.predict_obs_tokens(obs_dict)
                                         if hasattr(policy, "inference_head"):
                                             policy.inference_head = "50hz"
-                                        noisy_trajectory = policy.sample_noisy_trajectory()
+                                        noisy_result = policy.sample_noisy_trajectory()
+                                        # DPCTMMultiFreqPolicy returns (tensor, head_str),
+                                        # other policies return just tensor
+                                        if isinstance(noisy_result, tuple):
+                                            noisy_trajectory = noisy_result[0]
+                                        else:
+                                            noisy_trajectory = noisy_result
                                     if update_tcp:
                                         tcp_obs_tokens = obs_tokens
                                         tcp_noisy_trajectory = noisy_trajectory
