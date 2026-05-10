@@ -10,6 +10,7 @@ from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTrans
 from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
 from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
+from ImplicitRDP.policy.fm_multifreq_rdt_distill_policy import FMMultiFreqRDTDistillPolicy
 from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
@@ -116,6 +117,19 @@ def main(cfg):
         logger.info(f"DPCTMMultiFreqPolicy: inference_head={inference_head}, "
                     f"training_stage={training_stage}, "
                     f"num_inference_steps_50hz={num_inference_steps_50hz}")
+    elif isinstance(policy, FMMultiFreqRDTDistillPolicy):
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        policy.inference_head = cfg.policy.get('inference_head', '50hz')
+        policy.num_inference_steps = cfg.policy.get('num_inference_steps', 10)
+        policy.set_training_stage(int(cfg.policy.get('training_stage', 2)))
+        logger.info(
+            f"FMMultiFreqRDTDistillPolicy: inference_head={policy.inference_head}, "
+            f"num_inference_steps={policy.num_inference_steps}"
+        )
     elif isinstance(policy, FMMultiFreqPolicy):
         # FM Multi-Freq policy (no confidence head)
         policy = workspace.model

@@ -16,6 +16,9 @@ from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_consistency_policy import FMMultiFreqConsistencyPolicy
 from ImplicitRDP.policy.fm_multifreq_ctm_policy import FMMultiFreqCTMPolicy
 from ImplicitRDP.policy.fm_multifreq_shortcut_policy import FMMultiFreqShortcutPolicy
+from ImplicitRDP.policy.fm_multifreq_rdt_distill_policy import (
+    FMMultiFreqRDTDistillPolicy,
+)
 from ImplicitRDP.dataset.base_dataset import BaseImageDataset
 from ImplicitRDP.common.pytorch_util import dict_apply
 
@@ -167,11 +170,13 @@ def main(cfg):
         FMMultiFreqConsistencyPolicy,
         FMMultiFreqCTMPolicy,
         FMMultiFreqShortcutPolicy,
+        FMMultiFreqRDTDistillPolicy,
     )
     if not isinstance(policy, supported_policy_types):
         raise ValueError(
             "Expected FMMultiFreqPolicy, FMMultiFreqConsistencyPolicy, "
-            "FMMultiFreqCTMPolicy, or FMMultiFreqShortcutPolicy, "
+            "FMMultiFreqCTMPolicy, FMMultiFreqShortcutPolicy, "
+            "or FMMultiFreqRDTDistillPolicy, "
             f"got {type(policy)}"
         )
 

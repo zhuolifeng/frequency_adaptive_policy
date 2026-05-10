@@ -16,6 +16,7 @@ from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTrans
 from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
 from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
+from ImplicitRDP.policy.fm_multifreq_rdt_distill_policy import FMMultiFreqRDTDistillPolicy
 from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
@@ -531,7 +532,7 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy, DPCTMMultiFreqPolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy, FMMultiFreqRDTDistillPolicy, DPCTMMultiFreqPolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:

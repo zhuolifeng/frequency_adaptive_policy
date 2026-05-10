@@ -9,6 +9,7 @@ ROUND="${ROUND:-1}"
 #   consistency -> train_fm_multifreq_consistency_workspace
 #   ctm         -> train_fm_multifreq_ctm_workspace
 #   shortcut    -> train_fm_multifreq_shortcut_workspace
+#   rdt_distill -> train_fm_multifreq_rdt_distill_workspace
 POLICY_TYPE="${POLICY_TYPE:-shortcut}"
 if [ -z "${CONFIG_NAME}" ]; then
     case "${POLICY_TYPE}" in
@@ -24,8 +25,11 @@ if [ -z "${CONFIG_NAME}" ]; then
         shortcut)
             CONFIG_NAME="train_fm_multifreq_shortcut_workspace"
             ;;
+        rdt_distill)
+            CONFIG_NAME="train_fm_multifreq_rdt_distill_workspace"
+            ;;
         *)
-            echo "Unsupported POLICY_TYPE=${POLICY_TYPE}. Use fm, consistency, ctm, or shortcut."
+            echo "Unsupported POLICY_TYPE=${POLICY_TYPE}. Use fm, consistency, ctm, shortcut, or rdt_distill."
             exit 1
             ;;
     esac
@@ -88,6 +92,10 @@ if [ "${CONFIG_NAME}" = "train_fm_multifreq_workspace" ]; then
 fi
 
 if [ "${CONFIG_NAME}" = "train_fm_multifreq_ctm_workspace" ]; then
+    ARGS+=("+training_stage=2")
+fi
+
+if [ "${CONFIG_NAME}" = "train_fm_multifreq_rdt_distill_workspace" ]; then
     ARGS+=("+training_stage=2")
 fi
 
