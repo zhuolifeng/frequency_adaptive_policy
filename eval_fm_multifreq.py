@@ -209,6 +209,12 @@ def main(cfg):
         policy.use_distillation = bool(configured_use_distillation)
         logger.info(f"Override policy.use_distillation: {original_use_distillation} -> {policy.use_distillation}")
 
+    configured_inference_solver = cfg.get('inference_solver', None)
+    if configured_inference_solver is not None and hasattr(policy, 'inference_solver'):
+        original_inference_solver = getattr(policy, 'inference_solver', 'euler')
+        policy.inference_solver = str(configured_inference_solver)
+        logger.info(f"Override policy.inference_solver: {original_inference_solver} -> {policy.inference_solver}")
+
     logger.info(f"Policy type: {type(policy).__name__}")
 
     device = torch.device(cfg.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))

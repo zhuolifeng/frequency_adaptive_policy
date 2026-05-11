@@ -42,6 +42,7 @@ class TransformerForRDTDistillMultiFreq(ModuleAttrMixin):
         freq_ratio: int = 5,
         action_offset_10hz: int = 8,
         temporal_offset_10hz: int = 4,
+        use_skip_connection: bool = False,
     ) -> None:
         super().__init__()
 
@@ -115,8 +116,11 @@ class TransformerForRDTDistillMultiFreq(ModuleAttrMixin):
         self.action_offset_10hz = action_offset_10hz
         self.temporal_offset_10hz = temporal_offset_10hz
         self.n_emb = n_emb
+        self.use_skip_connection = use_skip_connection
 
         self.apply(self._init_weights)
+        if use_skip_connection:
+            logger.info("Skip connection enabled for 50hz: output = head(x) + sample")
         logger.info(
             "number of parameters: %e",
             sum(p.numel() for p in self.parameters()),
@@ -312,4 +316,7 @@ class TransformerForRDTDistillMultiFreq(ModuleAttrMixin):
             )
 
         x = self.ln_f(tgt)
-        return self.head(x)
+        output = self.head(x)
+        if self.use_skip_connection and kwargs.get("apply_skip", False):
+            output = output + sample
+        return output

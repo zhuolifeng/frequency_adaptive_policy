@@ -13,26 +13,28 @@ TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 USE_DISTILLATION=True
 
 # Training epochs
-STAGE1_EPOCHS=900    # FM velocity matching (10hz + 50hz)
-STAGE2_EPOCHS=400    # 50hz endpoint distillation + 10hz FM
+STAGE1_EPOCHS=700    # FM velocity matching (10hz + 50hz)
+STAGE2_EPOCHS=300    # 50hz endpoint distillation + 10hz FM
 
 TOTAL_EPOCHS=$((STAGE1_EPOCHS + STAGE2_EPOCHS))
 
-DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_1_zarr"
+DATASET_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_1_zarr"
 
 USE_AMP_FOR_POLICY=False
 AMP_DTYPE_FOR_POLICY="bf16"
 TRAINING_DEBUG=False
 POLICY_LR=1.0e-4
 STAGE2_LR=1.0e-5
-DISTILL_GT_WEIGHT=0.1
-TEACHER_STEPS=10
-TEACHER_SOLVER="heun"
+DISTILL_GT_WEIGHT=0
+TEACHER_STEPS=50
+TEACHER_SOLVER="euler"
+USE_SKIP_CONNECTION=True
 #--------------------------------
 
 echo "=========================================="
 echo "RDT-style multi-frequency FM training"
 echo "  Use distillation: ${USE_DISTILLATION}"
+echo "  Use skip connection: ${USE_SKIP_CONNECTION}"
 echo "  Stage 1: ${STAGE1_EPOCHS} epochs (10Hz + 50Hz FM velocity matching)"
 if [ "${USE_DISTILLATION}" = "True" ]; then
 echo "  Stage 2: ${STAGE2_EPOCHS} epochs (10Hz FM + 50Hz endpoint distillation)"
@@ -62,6 +64,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port 29501 train
     training.freeze_condition_modules_stage2=True \
     policy.training_stage=1 \
     optimizer.lr=${POLICY_LR} \
-    optimizer.stage2_lr=${STAGE2_LR}
+    optimizer.stage2_lr=${STAGE2_LR} \
+    policy.model.use_skip_connection=${USE_SKIP_CONNECTION}
 
 exit 0

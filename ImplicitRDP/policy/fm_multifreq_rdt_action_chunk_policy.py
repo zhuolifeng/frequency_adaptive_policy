@@ -50,9 +50,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         action_start_50hz: int = 13,
         teacher_num_inference_steps: int = 5,
         teacher_solver: str = "heun",
-        distill_gt_weight: float = 0.1,
         training_stage: int = 1,
         inference_head: str = "50hz",
+        inference_solver: str = "euler",
         **kwargs,
     ):
         super().__init__()
@@ -115,9 +115,13 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
                 f"Unsupported teacher_solver={teacher_solver}. Expected 'euler' or 'heun'."
             )
         self.teacher_solver = teacher_solver
-        self.distill_gt_weight = distill_gt_weight
         self.training_stage = training_stage
         self.inference_head = inference_head
+        if inference_solver not in ("euler", "heun"):
+            raise ValueError(
+                f"Unsupported inference_solver={inference_solver}. Expected 'euler' or 'heun'."
+            )
+        self.inference_solver = inference_solver
         self.use_amp_for_inference = use_amp_for_inference
         if use_amp_for_inference:
             if amp_dtype == "bf16" and torch.cuda.is_bf16_supported():
@@ -135,9 +139,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         logger.info(
             "FMMultiFreqRDTActionChunkPolicy initialized "
             f"(stage={training_stage}, inference_head={inference_head}, "
+            f"inference_solver={inference_solver}, "
             f"teacher_num_inference_steps={teacher_num_inference_steps}, "
             f"teacher_solver={teacher_solver}, "
-            f"distill_gt_weight={distill_gt_weight})"
         )
 
     # ------------------------------------------------------------------
@@ -617,14 +621,12 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         )
         pred_v_50 = noise_50 - x0_pred_50
         loss_50_distill = F.mse_loss(pred_v_50, target_total_v)
-        loss_50_gt = F.mse_loss(pred_v_50, noise_50 - nactions_50)
-        loss_50 = loss_50_distill + self.distill_gt_weight * loss_50_gt
+        loss_50 = loss_50_distill 
 
         total_loss = loss_10 + loss_50
         loss_dict = {
             "fm_loss_10hz": float(loss_10.item()),
             "distill_loss_50hz": float(loss_50_distill.item()),
-            "gt_anchor_loss_50hz": float(loss_50_gt.item()),
             "total_loss": float(total_loss.item()),
             "training_stage": float(self.training_stage),
         }
@@ -682,16 +684,30 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             temporal_cond_10hz,
             "10hz",
             steps,
+            solver=self.inference_solver,
         )
 
-        # 50Hz predicts the one-step action chunk x0 directly.
+        # 50Hz inference
         noise_50 = torch.randn(B, self.horizon_50hz, self.action_dim, device=obs_tokens.device, dtype=obs_tokens.dtype)
-        nsample_50, _ = self._one_step_action_chunk(
-            self.model,
-            noise_50,
-            obs_tokens,
-            temporal_cond_50hz,
-        )
+        if self.training_stage == 1:
+            # Stage 1: 流匹配模型，用多步 ODE 求解（和 10Hz 一样）
+            nsample_50 = self._solve_ode(
+                self.model,
+                noise_50,
+                obs_tokens,
+                temporal_cond_50hz,
+                "50hz",
+                steps,
+                solver=self.inference_solver,
+            )
+        else:
+            # Stage 2: 蒸馏后的模型，单步 action chunk 预测
+            nsample_50, _ = self._one_step_action_chunk(
+                self.model,
+                noise_50,
+                obs_tokens,
+                temporal_cond_50hz,
+            )
 
         expected_10 = temporal_cond_10hz.shape[1] if temporal_cond_10hz is not None else self.horizon_10hz
         expected_50 = temporal_cond_50hz.shape[1] if temporal_cond_50hz is not None else self.horizon_50hz

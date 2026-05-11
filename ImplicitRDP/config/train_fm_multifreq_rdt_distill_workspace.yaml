@@ -64,6 +64,7 @@ policy:
     n_cond_layers: 0
     horizon_10hz: 16
     horizon_50hz: 80
+    use_skip_connection: False
 
   n_emb: ${n_emb}
   horizon: ${horizon}
@@ -154,7 +155,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
-  backend: wandb
+  backend: tensorboard
   project: fm_multifreq_rdt_distill_policy
   resume: False
   mode: online
