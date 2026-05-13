@@ -13,12 +13,12 @@ TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 USE_DISTILLATION=True
 
 # Training epochs
-STAGE1_EPOCHS=700    # x0 prediction loss (10hz + 50hz)
+STAGE1_EPOCHS=800    # x0 prediction loss (10hz + 50hz)
 STAGE2_EPOCHS=300    # 50hz x0 distillation + 10hz x0 loss
 
 TOTAL_EPOCHS=$((STAGE1_EPOCHS + STAGE2_EPOCHS))
 
-DATASET_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_1_zarr"
+DATASET_PATH="/mnt/data/users/lifeng/${TASK}_${DATASET_VERSION}_round_1_zarr"
 
 USE_AMP_FOR_POLICY=False
 AMP_DTYPE_FOR_POLICY="bf16"
@@ -26,7 +26,7 @@ TRAINING_DEBUG=False
 POLICY_LR=1.0e-4
 STAGE2_LR=1.0e-5
 TEACHER_STEPS=60
-TEACHER_SOLVER="euler"
+TEACHER_SOLVER="${TEACHER_SOLVER:-euler}"
 DISTILL_GT_WEIGHT=1
 #--------------------------------
 
@@ -39,6 +39,7 @@ echo "  Stage 2: ${STAGE2_EPOCHS} epochs (10Hz x0 + 50Hz x0 distillation)"
 fi
 echo "  Total:   ${TOTAL_EPOCHS} epochs"
 echo "  Dataset: ${DATASET_PATH}"
+echo "  Teacher solver: ${TEACHER_SOLVER}"
 echo "=========================================="
 
 POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_fm_multifreq_rdt_action_chunk

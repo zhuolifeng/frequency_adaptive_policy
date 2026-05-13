@@ -74,6 +74,11 @@ policy:
   num_inference_steps: 10
   beta_a: 1.5
   beta_b: 1.0
+  time_sampler: "logit_normal"
+  P_mean: -0.8
+  P_std: 0.8
+  t_eps: 0.05
+  noise_scale: 1.0
 
   use_rnn_obs_encoder: True
   rnn_obs_encoder_n_layer: 1
@@ -90,6 +95,7 @@ policy:
 
   teacher_num_inference_steps: 10
   teacher_solver: "heun"
+  inference_solver: "heun"
   training_stage: 1
 
 ema:
