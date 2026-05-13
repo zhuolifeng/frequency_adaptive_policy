@@ -12,6 +12,7 @@ from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
 from ImplicitRDP.policy.fm_multifreq_rdt_action_chunk_policy import FMMultiFreqRDTActionChunkPolicy
 from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
+from ImplicitRDP.policy.act_50hz_policy import ACT50HzPolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
 
@@ -137,6 +138,17 @@ def main(cfg):
             policy = workspace.ema_model
         device = torch.device('cuda')
         policy.eval().to(device)
+    elif isinstance(policy, ACT50HzPolicy):
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        policy.action_start_50hz = int(cfg.policy.get('action_start_50hz', policy.action_start_50hz))
+        logger.info(
+            f"ACT50HzPolicy: horizon={policy.action_horizon}, "
+            f"action_start_50hz={policy.action_start_50hz}"
+        )
     elif isinstance(policy, FlowMatchingTransformerImagePolicy) or 'fm' in cfg.name:
         # flow matching transformer model
         policy: FlowMatchingTransformerImagePolicy

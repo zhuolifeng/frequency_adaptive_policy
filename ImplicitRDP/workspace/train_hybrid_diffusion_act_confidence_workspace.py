@@ -149,22 +149,14 @@ class TrainHybridDiffusionACTConfidenceWorkspace(BaseWorkspace):
             with open(dataset_resume_params_path, 'wb') as f:
                 pickle.dump(dataset_resume_params, f)
 
-        # compute normalizer on the main process and save to disk
-        normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
-        if accelerator.is_main_process:
-            normalizer = dataset.get_normalizer()
-            if cfg.training.pretrained_ckpt_path is not None:
-                normalizer_state_dict = normalizer.state_dict()
-                current_normalizer_state_dict = self.model.normalizer.state_dict()
-                for key in current_normalizer_state_dict.keys():
-                    normalizer_state_dict[key] = current_normalizer_state_dict[key]
-                normalizer.load_state_dict(normalizer_state_dict)
-            pickle.dump(normalizer, open(normalizer_path, 'wb'))
-
-        # load normalizer on all processes
-        accelerator.wait_for_everyone()
-        normalizer = pickle.load(open(normalizer_path, 'rb'))
-
+        # compute normalizer on all processes independently
+        normalizer = dataset.get_normalizer()
+        if cfg.training.pretrained_ckpt_path is not None:
+            normalizer_state_dict = normalizer.state_dict()
+            current_normalizer_state_dict = self.model.normalizer.state_dict()
+            for key in current_normalizer_state_dict.keys():
+                normalizer_state_dict[key] = current_normalizer_state_dict[key]
+            normalizer.load_state_dict(normalizer_state_dict)
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
@@ -215,21 +207,22 @@ class TrainHybridDiffusionACTConfidenceWorkspace(BaseWorkspace):
         logger.info("Starting training...")
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
-                self.model.update_progress(local_epoch_idx / cfg.training.num_epochs)
+                unwrapped_model = accelerator.unwrap_model(self.model)
+                unwrapped_model.update_progress(local_epoch_idx / cfg.training.num_epochs)
                 print(f"local_epoch_idx: {local_epoch_idx}, cfg.training.num_epochs: {cfg.training.num_epochs}")
                 # Update epoch for stage-based training
-                if hasattr(self.model, 'set_epoch'):
-                    self.model.set_epoch(self.epoch)
+                if hasattr(unwrapped_model, 'set_epoch'):
+                    unwrapped_model.set_epoch(self.epoch)
                 
                 # 打印当前训练阶段信息
-                if hasattr(self.model, 'stage1_epochs'):
-                    if self.epoch < self.model.stage1_epochs:
+                if hasattr(unwrapped_model, 'stage1_epochs'):
+                    if self.epoch < unwrapped_model.stage1_epochs:
                         stage = 'Stage 1 (ACT + Confidence only)'
                         dp_weight = 0.0
                     else:
                         stage = 'Stage 2 (All components)'
                         dp_weight = 1.0
-                    if self.epoch % 10 == 0 or self.epoch == self.model.stage1_epochs - 1:
+                    if self.epoch % 10 == 0 or self.epoch == unwrapped_model.stage1_epochs - 1:
                         logger.info(f"Epoch {self.epoch}: {stage}, DP loss weight = {dp_weight}")
                 
                 self.model.train()
@@ -250,7 +243,7 @@ class TrainHybridDiffusionACTConfidenceWorkspace(BaseWorkspace):
 
                         # compute loss
                         with autocast(enabled=use_amp, dtype=amp_dtype):
-                            raw_loss, loss_dict = self.model.compute_loss(batch)
+                            raw_loss, loss_dict = unwrapped_model.compute_loss(batch)
                             loss = raw_loss / cfg.training.gradient_accumulate_every
                             
                         # Scale loss and backward pass
@@ -368,4 +361,3 @@ class TrainHybridDiffusionACTConfidenceWorkspace(BaseWorkspace):
 
         accelerator.end_training()
         logger.info("Training completed!")
-
