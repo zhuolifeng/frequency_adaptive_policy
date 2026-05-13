@@ -50,6 +50,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         action_start_50hz: int = 13,
         teacher_num_inference_steps: int = 5,
         teacher_solver: str = "heun",
+        distill_gt_weight: float = 0.1,
         training_stage: int = 1,
         inference_head: str = "50hz",
         inference_solver: str = "euler",
@@ -115,6 +116,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
                 f"Unsupported teacher_solver={teacher_solver}. Expected 'euler' or 'heun'."
             )
         self.teacher_solver = teacher_solver
+        self.distill_gt_weight = distill_gt_weight
         self.training_stage = training_stage
         self.inference_head = inference_head
         if inference_solver not in ("euler", "heun"):
@@ -543,8 +545,6 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             temporal_cond_10hz,
             "10hz",
         )
-        pred_v_10 = self._velocity_from_x0(x_t_10, x0_pred_10, timesteps)
-        target_10 = noise_10 - nactions_10
 
         noise_50 = torch.randn_like(nactions_50)
         x_t_50 = t_exp * noise_50 + (1 - t_exp) * nactions_50
@@ -556,9 +556,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             temporal_cond_50hz,
             "50hz",
         )
-        pred_v_50 = self._velocity_from_x0(x_t_50, x0_pred_50, timesteps)
-        target_50 = noise_50 - nactions_50
-        return pred_v_10, target_10, pred_v_50, target_50, obs_tokens, temporal_cond_10hz, temporal_cond_50hz
+        return x0_pred_10, nactions_10, x0_pred_50, nactions_50, obs_tokens, temporal_cond_10hz, temporal_cond_50hz
 
     def _compute_stage2_loss(self, batch):
         assert self.teacher_model is not None, "teacher_model must be set for Stage 2"
@@ -594,9 +592,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             temporal_cond_10hz,
             "10hz",
         )
-        pred_v_10 = self._velocity_from_x0(x_t_10, x0_pred_10, timesteps)
-        target_10 = noise_10 - nactions_10
-        loss_10 = F.mse_loss(pred_v_10, target_10)
+        loss_10 = F.mse_loss(x0_pred_10, nactions_10)
 
         noise_50 = torch.randn_like(nactions_50)
         with torch.no_grad():
@@ -609,7 +605,6 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
                 self.teacher_num_inference_steps,
                 solver=self.teacher_solver,
             )
-            target_total_v = noise_50 - teacher_x0
 
         x0_pred_50 = self._predict_x0(
             self.model,
@@ -619,14 +614,15 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             temporal_cond_50hz,
             "50hz",
         )
-        pred_v_50 = noise_50 - x0_pred_50
-        loss_50_distill = F.mse_loss(pred_v_50, target_total_v)
-        loss_50 = loss_50_distill 
+        loss_50_distill = F.mse_loss(x0_pred_50, teacher_x0)
+        loss_50_gt = F.mse_loss(x0_pred_50, nactions_50)
+        loss_50 = loss_50_distill + self.distill_gt_weight * loss_50_gt
 
         total_loss = loss_10 + loss_50
         loss_dict = {
-            "fm_loss_10hz": float(loss_10.item()),
-            "distill_loss_50hz": float(loss_50_distill.item()),
+            "x0_loss_10hz": float(loss_10.item()),
+            "distill_x0_loss_50hz": float(loss_50_distill.item()),
+            "gt_x0_loss_50hz": float(loss_50_gt.item()),
             "total_loss": float(total_loss.item()),
             "training_stage": float(self.training_stage),
         }
@@ -634,14 +630,14 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
 
     def compute_loss(self, batch, loss_mask=None):
         if self.training_stage == 1:
-            pred_v_10, target_10, pred_v_50, target_50, *_ = self.model_forward(batch)
-            loss_10 = F.mse_loss(pred_v_10, target_10)
-            loss_50 = F.mse_loss(pred_v_50, target_50)
+            x0_pred_10, x0_gt_10, x0_pred_50, x0_gt_50, *_ = self.model_forward(batch)
+            loss_10 = F.mse_loss(x0_pred_10, x0_gt_10)
+            loss_50 = F.mse_loss(x0_pred_50, x0_gt_50)
             fm_loss = loss_10 + loss_50
             return fm_loss, {
-                "fm_velocity_loss": float(fm_loss.item()),
-                "fm_velocity_loss_10hz": float(loss_10.item()),
-                "fm_velocity_loss_50hz": float(loss_50.item()),
+                "x0_loss": float(fm_loss.item()),
+                "x0_loss_10hz": float(loss_10.item()),
+                "x0_loss_50hz": float(loss_50.item()),
                 "total_loss": float(fm_loss.item()),
                 "training_stage": 1.0,
             }

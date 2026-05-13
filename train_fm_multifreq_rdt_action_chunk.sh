@@ -13,8 +13,8 @@ TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 USE_DISTILLATION=True
 
 # Training epochs
-STAGE1_EPOCHS=700    # FM velocity matching (10hz + 50hz)
-STAGE2_EPOCHS=300    # 50hz endpoint distillation + 10hz FM
+STAGE1_EPOCHS=700    # x0 prediction loss (10hz + 50hz)
+STAGE2_EPOCHS=300    # 50hz x0 distillation + 10hz x0 loss
 
 TOTAL_EPOCHS=$((STAGE1_EPOCHS + STAGE2_EPOCHS))
 
@@ -27,14 +27,15 @@ POLICY_LR=1.0e-4
 STAGE2_LR=1.0e-5
 TEACHER_STEPS=60
 TEACHER_SOLVER="euler"
+DISTILL_GT_WEIGHT=1
 #--------------------------------
 
 echo "=========================================="
 echo "RDT-style multi-frequency FM training"
 echo "  Use distillation: ${USE_DISTILLATION}"
-echo "  Stage 1: ${STAGE1_EPOCHS} epochs (10Hz + 50Hz FM velocity matching)"
+echo "  Stage 1: ${STAGE1_EPOCHS} epochs (10Hz + 50Hz x0 prediction)"
 if [ "${USE_DISTILLATION}" = "True" ]; then
-echo "  Stage 2: ${STAGE2_EPOCHS} epochs (10Hz FM + 50Hz endpoint distillation)"
+echo "  Stage 2: ${STAGE2_EPOCHS} epochs (10Hz x0 + 50Hz x0 distillation)"
 fi
 echo "  Total:   ${TOTAL_EPOCHS} epochs"
 echo "  Dataset: ${DATASET_PATH}"
@@ -50,6 +51,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port 29502 train
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
     policy.teacher_num_inference_steps=${TEACHER_STEPS} \
     policy.teacher_solver=${TEACHER_SOLVER} \
+    +policy.distill_gt_weight=${DISTILL_GT_WEIGHT} \
     training.num_epochs=${TOTAL_EPOCHS} \
     training.use_distillation=${USE_DISTILLATION} \
     training.stage1_epochs=${STAGE1_EPOCHS} \

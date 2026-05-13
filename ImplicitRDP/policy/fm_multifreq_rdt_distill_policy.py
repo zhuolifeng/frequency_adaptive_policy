@@ -600,6 +600,8 @@ class FMMultiFreqRDTDistillPolicy(BaseImagePolicy):
             "total_loss": float(total_loss.item()),
             "training_stage": float(self.training_stage),
         }
+        if hasattr(self.model, "skip_scale"):
+            loss_dict["skip_scale"] = float(self.model.skip_scale.item())
         return total_loss, loss_dict
 
     def compute_loss(self, batch, loss_mask=None):

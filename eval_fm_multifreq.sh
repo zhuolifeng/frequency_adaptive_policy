@@ -36,7 +36,7 @@ if [ -z "${CONFIG_NAME}" ]; then
 fi
 
 # Checkpoint path. Override with CKPT_PATH=/path/to/checkpoint.ckpt.
-CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.05.10/14.24.47_train_fm_multifreq_rdt_distill_workspace_dual_switch_v6_fm_multifreq_rdt_distill/checkpoints/stage1_final.ckpt}"
+CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.05.12/14.20.05_train_fm_multifreq_rdt_distill_workspace_dual_switch_v6_fm_multifreq_rdt_distill/checkpoints/latest.ckpt}"
 
 # Dataset path. Override with DATASET_PATH=/path/to/zarr.
 DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
@@ -46,11 +46,10 @@ GPU_DEVICE="${GPU_DEVICE:-cuda:4}"
 VIDEO_FPS="${VIDEO_FPS:-1}"
 NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-10}"
 NUM_INFERENCE_STEPS_10HZ="${NUM_INFERENCE_STEPS_10HZ:-20}"
-SHORTCUT_VERSION="${SHORTCUT_VERSION:-new}"
 USE_DISTILLATION="${USE_DISTILLATION:-True}"
-INFERENCE_SOLVER="${INFERENCE_SOLVER:-heun}"
+INFERENCE_SOLVER="${INFERENCE_SOLVER:-euler}"
 
-OUTPUT_DIR="${OUTPUT_DIR:-evaluations_fm_multifreq_rdt_10steps_heun}"
+OUTPUT_DIR="${OUTPUT_DIR:-evaluations_fm_multifreq_rdt_10steps_euler_skip_connection}"
 
 echo "=========================================="
 echo "FM MultiFreq Policy Evaluation"
@@ -99,7 +98,7 @@ if [ "${CONFIG_NAME}" = "train_fm_multifreq_ctm_workspace" ]; then
 fi
 
 if [ "${CONFIG_NAME}" = "train_fm_multifreq_rdt_distill_workspace" ]; then
-    ARGS+=("+training_stage=1")
+    ARGS+=("+training_stage=2")
 fi
 
 python eval_fm_multifreq.py "${ARGS[@]}"

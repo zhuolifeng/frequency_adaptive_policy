@@ -117,10 +117,12 @@ class TransformerForRDTDistillMultiFreq(ModuleAttrMixin):
         self.temporal_offset_10hz = temporal_offset_10hz
         self.n_emb = n_emb
         self.use_skip_connection = use_skip_connection
+        if use_skip_connection:
+            self.skip_scale = nn.Parameter(torch.zeros(1))
 
         self.apply(self._init_weights)
         if use_skip_connection:
-            logger.info("Skip connection enabled for 50hz: output = head(x) + sample")
+            logger.info("Skip connection enabled for 50hz: output = head(x) + skip_scale * sample (skip_scale init=0)")
         logger.info(
             "number of parameters: %e",
             sum(p.numel() for p in self.parameters()),
@@ -231,6 +233,8 @@ class TransformerForRDTDistillMultiFreq(ModuleAttrMixin):
         no_decay.add("pos_emb")
         no_decay.add("cond_pos_emb")
         no_decay.add("_dummy_variable")
+        if self.use_skip_connection:
+            no_decay.add("skip_scale")
         param_dict = {pn: p for pn, p in self.named_parameters()}
         inter_params = decay & no_decay
         union_params = decay | no_decay
@@ -318,5 +322,5 @@ class TransformerForRDTDistillMultiFreq(ModuleAttrMixin):
         x = self.ln_f(tgt)
         output = self.head(x)
         if self.use_skip_connection and kwargs.get("apply_skip", False):
-            output = output + sample
+            output = output + self.skip_scale * sample
         return output
