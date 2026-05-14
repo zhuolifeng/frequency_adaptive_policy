@@ -136,6 +136,7 @@ training:
   debug: False
   resume: False
   pretrained_ckpt_path: null
+  stage1_ckpt_path: null
   use_amp: False
   amp_dtype: "bf16"
   lr_scheduler: cosine

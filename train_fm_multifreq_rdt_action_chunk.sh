@@ -11,11 +11,11 @@ ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness"
 TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 
 # RDT-style distillation control
-USE_DISTILLATION=True
+USE_DISTILLATION="${USE_DISTILLATION:-True}"
 
 # Training epochs
-STAGE1_EPOCHS=800    # x0 prediction loss (10hz + 50hz)
-STAGE2_EPOCHS=300    # 50hz x0 distillation + 10hz x0 loss
+STAGE1_EPOCHS="${STAGE1_EPOCHS:-800}"    # x0 prediction loss (10hz + 50hz)
+STAGE2_EPOCHS="${STAGE2_EPOCHS:-300}"    # 50hz x0 distillation + 10hz x0 loss
 
 TOTAL_EPOCHS=$((STAGE1_EPOCHS + STAGE2_EPOCHS))
 
@@ -30,6 +30,7 @@ TEACHER_STEPS=10
 TEACHER_SOLVER="${TEACHER_SOLVER:-euler}"
 DISTILL_GT_WEIGHT=1
 LOSS_TYPE="${LOSS_TYPE:-velocity}"
+STAGE1_CKPT_PATH="${STAGE1_CKPT_PATH:-null}"
 #--------------------------------
 
 echo "=========================================="
@@ -43,6 +44,7 @@ echo "  Total:   ${TOTAL_EPOCHS} epochs"
 echo "  Dataset: ${DATASET_PATH}"
 echo "  Teacher solver: ${TEACHER_SOLVER}"
 echo "  Loss type: ${LOSS_TYPE}"
+echo "  Stage 1 ckpt path: ${STAGE1_CKPT_PATH}"
 echo "  GPUs: ${GPU_ID} (${NUM_PROCESSES} processes)"
 echo "=========================================="
 
@@ -62,6 +64,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --num_processes ${NUM_PROCESSES
     training.use_distillation=${USE_DISTILLATION} \
     training.stage1_epochs=${STAGE1_EPOCHS} \
     training.stage2_epochs=${STAGE2_EPOCHS} \
+    training.stage1_ckpt_path=${STAGE1_CKPT_PATH} \
     training.use_amp=${USE_AMP_FOR_POLICY} \
     training.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
     training.debug=${TRAINING_DEBUG} \

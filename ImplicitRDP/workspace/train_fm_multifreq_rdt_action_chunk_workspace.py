@@ -135,10 +135,32 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
     def _load_pretrained_if_needed(self, cfg):
         if cfg.training.resume:
             assert cfg.training.pretrained_ckpt_path is None
+            assert cfg.training.get("stage1_ckpt_path", None) is None
             latest_ckpt_path = self.get_checkpoint_path()
             if latest_ckpt_path.is_file():
                 logger.info(f"Resuming from checkpoint {latest_ckpt_path}")
                 self.load_checkpoint(path=latest_ckpt_path)
+
+        stage1_ckpt_path = cfg.training.get("stage1_ckpt_path", None)
+        if stage1_ckpt_path is not None:
+            if int(cfg.training.get("stage1_epochs", 0)) != 0:
+                raise ValueError(
+                    "training.stage1_ckpt_path is only supported when "
+                    "training.stage1_epochs=0, so Stage 2 starts from a fixed "
+                    "Stage 1 checkpoint."
+                )
+            assert cfg.training.pretrained_ckpt_path is None
+            payload = torch.load(open(stage1_ckpt_path, "rb"), pickle_module=dill)
+            self.load_payload(
+                payload,
+                exclude_keys=["optimizer", "scaler"],
+                include_keys=[],
+                strict=False,
+            )
+            self.global_step = 0
+            self.epoch = 0
+            logger.info(f"Loaded fixed Stage 1 checkpoint for Stage 2: {stage1_ckpt_path}")
+            return
 
         if cfg.training.pretrained_ckpt_path is None:
             return
@@ -283,7 +305,10 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
                     self.ema_model.set_training_stage(current_stage)
 
                 if current_stage == 2 and not stage2_initialized:
-                    if accelerator.is_main_process:
+                    if (
+                        accelerator.is_main_process
+                        and cfg.training.get("stage1_ckpt_path", None) is None
+                    ):
                         stage1_ckpt_path = os.path.join(
                             self.output_dir, "checkpoints", "stage1_final.ckpt"
                         )
