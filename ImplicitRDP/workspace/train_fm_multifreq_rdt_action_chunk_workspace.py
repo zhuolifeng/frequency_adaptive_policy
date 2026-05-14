@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import tqdm
 from accelerate import Accelerator
+from accelerate import DistributedDataParallelKwargs
 from omegaconf import OmegaConf
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
@@ -89,13 +90,21 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
 
     def _make_accelerator(self, cfg):
         log_backend = cfg.logging.get("backend", "wandb")
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         if log_backend == "tensorboard":
             tb_log_dir = os.path.join(self.output_dir, "tb_logs")
-            accelerator = Accelerator(log_with="tensorboard", project_dir=tb_log_dir)
+            accelerator = Accelerator(
+                log_with="tensorboard",
+                project_dir=tb_log_dir,
+                kwargs_handlers=[ddp_kwargs],
+            )
         elif log_backend == "wandb":
-            accelerator = Accelerator(log_with="wandb")
+            accelerator = Accelerator(
+                log_with="wandb",
+                kwargs_handlers=[ddp_kwargs],
+            )
         elif log_backend in ("none", "disabled", None):
-            accelerator = Accelerator()
+            accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
         else:
             raise ValueError(
                 f"Unsupported logging.backend={log_backend}. "
@@ -234,12 +243,6 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
                 lr_scheduler,
             )
         )
-        if accelerator.state.num_processes > 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                accelerator.unwrap_model(self.model),
-                device_ids=[self.model.device],
-                find_unused_parameters=True,
-            )
 
         device = self.model.device
         if self.ema_model is not None:
@@ -326,12 +329,6 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
                             lr_scheduler_stage2,
                         )
                     )
-                    if accelerator.state.num_processes > 1:
-                        self.model = torch.nn.parallel.DistributedDataParallel(
-                            accelerator.unwrap_model(self.model),
-                            device_ids=[self.model.device],
-                            find_unused_parameters=True,
-                        )
 
                     if ema is not None:
                         self._set_fixed_ema_decay(

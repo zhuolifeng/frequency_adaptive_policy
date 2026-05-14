@@ -3,6 +3,7 @@
 #--------------------------------
 # Config
 GPU_ID=0,1,2,3,4,5,6,7
+NUM_PROCESSES=$(awk -F, '{print NF}' <<< "${GPU_ID}")
 
 TASK="dual_switch"
 DATASET_VERSION="v6"
@@ -25,7 +26,7 @@ AMP_DTYPE_FOR_POLICY="bf16"
 TRAINING_DEBUG=False
 POLICY_LR=1.0e-4
 STAGE2_LR=1.0e-5
-TEACHER_STEPS=60
+TEACHER_STEPS=10
 TEACHER_SOLVER="${TEACHER_SOLVER:-euler}"
 DISTILL_GT_WEIGHT=1
 LOSS_TYPE="${LOSS_TYPE:-velocity}"
@@ -42,10 +43,11 @@ echo "  Total:   ${TOTAL_EPOCHS} epochs"
 echo "  Dataset: ${DATASET_PATH}"
 echo "  Teacher solver: ${TEACHER_SOLVER}"
 echo "  Loss type: ${LOSS_TYPE}"
+echo "  GPUs: ${GPU_ID} (${NUM_PROCESSES} processes)"
 echo "=========================================="
 
 POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_fm_multifreq_rdt_action_chunk
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port 29502 train.py \
+CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --num_processes ${NUM_PROCESSES} --main_process_port 29502 train.py \
     --config-name=train_fm_multifreq_rdt_action_chunk_workspace \
     task=${TASK_CONFIG} \
     task.dataset_path=${DATASET_PATH} \
