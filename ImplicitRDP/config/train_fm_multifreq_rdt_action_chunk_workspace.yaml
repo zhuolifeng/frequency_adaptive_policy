@@ -79,6 +79,7 @@ policy:
   P_std: 0.8
   t_eps: 0.05
   noise_scale: 1.0
+  loss_type: "velocity"
 
   use_rnn_obs_encoder: True
   rnn_obs_encoder_n_layer: 1
@@ -159,7 +160,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
-  backend: tensorboard
+  backend: wandb
   project: fm_multifreq_rdt_action_chunk_policy
   resume: False
   mode: online

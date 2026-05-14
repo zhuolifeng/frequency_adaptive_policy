@@ -43,6 +43,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         P_std: float = 0.8,
         t_eps: float = 0.05,
         noise_scale: float = 1.0,
+        loss_type: str = "velocity",
         n_emb: int = 768,
         use_rnn_obs_encoder: bool = True,
         rnn_obs_encoder_n_layer: int = 1,
@@ -123,6 +124,11 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         self.P_std = P_std
         self.t_eps = t_eps
         self.noise_scale = noise_scale
+        if loss_type not in ("velocity", "x0"):
+            raise ValueError(
+                f"Unsupported loss_type={loss_type}. Expected 'velocity' or 'x0'."
+            )
+        self.loss_type = loss_type
         self.action_start_10hz = action_start_10hz
         self.action_start_50hz = action_start_50hz
         self.teacher_num_inference_steps = teacher_num_inference_steps
@@ -158,7 +164,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             f"(stage={training_stage}, inference_head={inference_head}, "
             f"inference_solver={inference_solver}, "
             f"time_sampler={time_sampler}, t_eps={t_eps}, "
-            f"noise_scale={noise_scale}, "
+            f"noise_scale={noise_scale}, loss_type={loss_type}, "
             f"teacher_num_inference_steps={teacher_num_inference_steps}, "
             f"teacher_solver={teacher_solver}, "
         )
@@ -301,6 +307,24 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         v_pred = self._velocity_from_x0(x_t, x0_pred, timestep)
         v_target = self._velocity_from_x0(x_t, x0_target, timestep)
         return F.mse_loss(v_pred, v_target)
+
+    def _action_loss_from_x0(
+        self,
+        x0_pred: torch.Tensor,
+        x0_target: torch.Tensor,
+    ):
+        return F.mse_loss(x0_pred, x0_target)
+
+    def _loss_from_x0(
+        self,
+        x_t: torch.Tensor,
+        x0_pred: torch.Tensor,
+        x0_target: torch.Tensor,
+        timestep: Union[torch.Tensor, float, int],
+    ):
+        if self.loss_type == "velocity":
+            return self._velocity_loss_from_x0(x_t, x0_pred, x0_target, timestep)
+        return self._action_loss_from_x0(x0_pred, x0_target)
 
     def _predict_x0(
         self,
@@ -651,7 +675,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             temporal_cond_10hz,
             "10hz",
         )
-        loss_10 = self._velocity_loss_from_x0(
+        loss_10 = self._loss_from_x0(
             x_t_10,
             x0_pred_10,
             nactions_10,
@@ -684,13 +708,13 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             device=noise_50.device,
             dtype=torch.float32,
         )
-        loss_50_distill = self._velocity_loss_from_x0(
+        loss_50_distill = self._loss_from_x0(
             noise_50,
             x0_pred_50,
             teacher_x0,
             t_full_noise,
         )
-        loss_50_gt = self._velocity_loss_from_x0(
+        loss_50_gt = self._loss_from_x0(
             noise_50,
             x0_pred_50,
             nactions_50,
@@ -700,9 +724,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
 
         total_loss = loss_10 + loss_50
         loss_dict = {
-            "velocity_loss_10hz": float(loss_10.item()),
-            "distill_velocity_loss_50hz": float(loss_50_distill.item()),
-            "gt_velocity_loss_50hz": float(loss_50_gt.item()),
+            f"{self.loss_type}_loss_10hz": float(loss_10.item()),
+            f"distill_{self.loss_type}_loss_50hz": float(loss_50_distill.item()),
+            f"gt_{self.loss_type}_loss_50hz": float(loss_50_gt.item()),
             "total_loss": float(total_loss.item()),
             "training_stage": float(self.training_stage),
         }
@@ -720,13 +744,13 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
                 timesteps,
                 *_,
             ) = self.model_forward(batch)
-            loss_10 = self._velocity_loss_from_x0(
+            loss_10 = self._loss_from_x0(
                 x_t_10,
                 x0_pred_10,
                 x0_gt_10,
                 timesteps,
             )
-            loss_50 = self._velocity_loss_from_x0(
+            loss_50 = self._loss_from_x0(
                 x_t_50,
                 x0_pred_50,
                 x0_gt_50,
@@ -734,9 +758,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             )
             fm_loss = loss_10 + loss_50
             return fm_loss, {
-                "velocity_loss": float(fm_loss.item()),
-                "velocity_loss_10hz": float(loss_10.item()),
-                "velocity_loss_50hz": float(loss_50.item()),
+                f"{self.loss_type}_loss": float(fm_loss.item()),
+                f"{self.loss_type}_loss_10hz": float(loss_10.item()),
+                f"{self.loss_type}_loss_50hz": float(loss_50.item()),
                 "total_loss": float(fm_loss.item()),
                 "training_stage": 1.0,
             }

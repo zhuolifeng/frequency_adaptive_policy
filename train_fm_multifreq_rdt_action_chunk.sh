@@ -28,6 +28,7 @@ STAGE2_LR=1.0e-5
 TEACHER_STEPS=60
 TEACHER_SOLVER="${TEACHER_SOLVER:-euler}"
 DISTILL_GT_WEIGHT=1
+LOSS_TYPE="${LOSS_TYPE:-velocity}"
 #--------------------------------
 
 echo "=========================================="
@@ -40,6 +41,7 @@ fi
 echo "  Total:   ${TOTAL_EPOCHS} epochs"
 echo "  Dataset: ${DATASET_PATH}"
 echo "  Teacher solver: ${TEACHER_SOLVER}"
+echo "  Loss type: ${LOSS_TYPE}"
 echo "=========================================="
 
 POLICY_TASK_NAME=${TASK}_${DATASET_VERSION}_fm_multifreq_rdt_action_chunk
@@ -52,6 +54,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port 29502 train
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
     policy.teacher_num_inference_steps=${TEACHER_STEPS} \
     policy.teacher_solver=${TEACHER_SOLVER} \
+    policy.loss_type=${LOSS_TYPE} \
     +policy.distill_gt_weight=${DISTILL_GT_WEIGHT} \
     training.num_epochs=${TOTAL_EPOCHS} \
     training.use_distillation=${USE_DISTILLATION} \
