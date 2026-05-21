@@ -231,6 +231,10 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
         train_dataloader = DataLoader(dataset, **dataloader_cfg)
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **val_dataloader_cfg)
+        # Accelerate advances prepared schedulers once per process when batches
+        # are sharded across processes. Keep the pre-prepare dataloader length
+        # as the scheduler-step basis for every stage.
+        scheduler_steps_per_epoch = len(train_dataloader)
 
         normalizer = dataset.get_normalizer()
         self.model.set_normalizer(normalizer)
@@ -333,7 +337,7 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
                         self.scaler = GradScaler()
 
                     stage2_steps = (
-                        len(train_dataloader) * self.stage2_epochs
+                        scheduler_steps_per_epoch * self.stage2_epochs
                     ) // cfg.training.gradient_accumulate_every
                     lr_scheduler_stage2 = get_scheduler(
                         cfg.training.lr_scheduler,
@@ -345,14 +349,10 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
                         last_epoch=-1,
                     )
 
-                    train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = (
-                        accelerator.prepare(
-                            train_dataloader,
-                            val_dataloader,
-                            unwrapped_model,
-                            self.optimizer,
-                            lr_scheduler_stage2,
-                        )
+                    self.model, self.optimizer, lr_scheduler = accelerator.prepare(
+                        unwrapped_model,
+                        self.optimizer,
+                        lr_scheduler_stage2,
                     )
 
                     if ema is not None:
@@ -362,7 +362,8 @@ class TrainFMMultiFreqRDTActionChunkWorkspace(BaseWorkspace):
                     stage2_initialized = True
                     logger.info(
                         "Stage 2 optimizer rebuilt: "
-                        f"lr={stage2_lr}, obs_encoder_lr={stage2_obs_encoder_lr}"
+                        f"lr={stage2_lr}, obs_encoder_lr={stage2_obs_encoder_lr}, "
+                        f"scheduler_steps={stage2_steps}"
                     )
 
                 self.model.train()

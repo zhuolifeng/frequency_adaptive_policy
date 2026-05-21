@@ -55,11 +55,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         action_start_10hz: int = 1,
         action_start_50hz: int = 13,
         teacher_num_inference_steps: int = 5,
-        teacher_solver: str = "heun",
         distill_gt_weight: float = 0.1,
         training_stage: int = 1,
         inference_head: str = "50hz",
-        inference_solver: str = "heun",
         **kwargs,
     ):
         super().__init__()
@@ -132,19 +130,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         self.action_start_10hz = action_start_10hz
         self.action_start_50hz = action_start_50hz
         self.teacher_num_inference_steps = teacher_num_inference_steps
-        if teacher_solver not in ("euler", "heun"):
-            raise ValueError(
-                f"Unsupported teacher_solver={teacher_solver}. Expected 'euler' or 'heun'."
-            )
-        self.teacher_solver = teacher_solver
         self.distill_gt_weight = distill_gt_weight
         self.training_stage = training_stage
         self.inference_head = inference_head
-        if inference_solver not in ("euler", "heun"):
-            raise ValueError(
-                f"Unsupported inference_solver={inference_solver}. Expected 'euler' or 'heun'."
-            )
-        self.inference_solver = inference_solver
         self.use_amp_for_inference = use_amp_for_inference
         if use_amp_for_inference:
             if amp_dtype == "bf16" and torch.cuda.is_bf16_supported():
@@ -162,11 +150,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         logger.info(
             "FMMultiFreqRDTActionChunkPolicy initialized "
             f"(stage={training_stage}, inference_head={inference_head}, "
-            f"inference_solver={inference_solver}, "
             f"time_sampler={time_sampler}, t_eps={t_eps}, "
             f"noise_scale={noise_scale}, loss_type={loss_type}, "
             f"teacher_num_inference_steps={teacher_num_inference_steps}, "
-            f"teacher_solver={teacher_solver}, "
         )
 
     # ------------------------------------------------------------------
@@ -386,12 +372,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         temporal_cond: Optional[torch.Tensor],
         freq_mode: str,
         num_inference_steps: int,
-        solver: str = "euler",
     ):
         if noisy_action is None:
             raise ValueError("noisy_action must be provided for ODE solve")
-        if solver not in ("euler", "heun"):
-            raise ValueError(f"Unsupported solver={solver}. Expected 'euler' or 'heun'.")
         trajectory = noisy_action
         B = trajectory.shape[0]
         t_schedule = torch.linspace(1.0, 0.0, num_inference_steps + 1, device=trajectory.device)
@@ -409,29 +392,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
                 model, trajectory, t_tensor, cond, temporal_cond, freq_mode
             )
             velocity = self._velocity_from_x0(trajectory, x0_pred, t_tensor)
-            use_heun = solver == "heun" and float(t_next.item()) > 0.0
-            if use_heun:
-                euler_trajectory = trajectory + dt * velocity
-                t_next_tensor = torch.full(
-                    (B,),
-                    float(t_next.item()) * 1000.0,
-                    device=trajectory.device,
-                    dtype=torch.float32,
-                )
-                next_x0_pred = self._predict_x0(
-                    model,
-                    euler_trajectory,
-                    t_next_tensor,
-                    cond,
-                    temporal_cond,
-                    freq_mode,
-                )
-                next_output = self._velocity_from_x0(
-                    euler_trajectory, next_x0_pred, t_next_tensor
-                )
-                trajectory = trajectory + 0.5 * dt * (velocity + next_output)
-            else:
-                trajectory = trajectory + dt * velocity
+            trajectory = trajectory + dt * velocity
         return trajectory
 
     def _one_step_action_chunk(
@@ -691,7 +652,6 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
                 temporal_cond_50hz,
                 "50hz",
                 self.teacher_num_inference_steps,
-                solver=self.teacher_solver,
             )
 
         x0_pred_50 = self._predict_x0(
@@ -810,7 +770,6 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             temporal_cond_10hz,
             "10hz",
             steps,
-            solver=self.inference_solver,
         )
 
         # 50Hz inference
@@ -833,7 +792,6 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
                 temporal_cond_50hz,
                 "50hz",
                 steps,
-                solver=self.inference_solver,
             )
         else:
             # Stage 2: 蒸馏后的模型，单步 action chunk 预测

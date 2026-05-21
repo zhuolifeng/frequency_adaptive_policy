@@ -95,8 +95,6 @@ policy:
   inference_head: "50hz"
 
   teacher_num_inference_steps: 10
-  teacher_solver: "heun"
-  inference_solver: "heun"
   training_stage: 1
 
 ema:

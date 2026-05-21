@@ -27,7 +27,6 @@ TRAINING_DEBUG=False
 POLICY_LR=1.0e-4
 STAGE2_LR=1.0e-5
 TEACHER_STEPS=10
-TEACHER_SOLVER="${TEACHER_SOLVER:-euler}"
 DISTILL_GT_WEIGHT=1
 LOSS_TYPE="${LOSS_TYPE:-velocity}"
 STAGE1_CKPT_PATH="${STAGE1_CKPT_PATH:-null}"
@@ -42,7 +41,7 @@ echo "  Stage 2: ${STAGE2_EPOCHS} epochs (10Hz x0 + 50Hz x0 distillation)"
 fi
 echo "  Total:   ${TOTAL_EPOCHS} epochs"
 echo "  Dataset: ${DATASET_PATH}"
-echo "  Teacher solver: ${TEACHER_SOLVER}"
+echo "  ODE solver: Euler"
 echo "  Loss type: ${LOSS_TYPE}"
 echo "  Stage 1 ckpt path: ${STAGE1_CKPT_PATH}"
 echo "  GPUs: ${GPU_ID} (${NUM_PROCESSES} processes)"
@@ -57,7 +56,6 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --num_processes ${NUM_PROCESSES
     policy.use_amp_for_inference=${USE_AMP_FOR_POLICY} \
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
     policy.teacher_num_inference_steps=${TEACHER_STEPS} \
-    policy.teacher_solver=${TEACHER_SOLVER} \
     policy.loss_type=${LOSS_TYPE} \
     +policy.distill_gt_weight=${DISTILL_GT_WEIGHT} \
     training.num_epochs=${TOTAL_EPOCHS} \
