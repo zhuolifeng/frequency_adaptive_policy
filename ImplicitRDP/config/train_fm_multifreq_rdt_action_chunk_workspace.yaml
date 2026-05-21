@@ -71,7 +71,7 @@ policy:
   n_obs_steps: ${n_obs_steps}
 
   # 10Hz keeps multi-step FM inference; 50Hz predicts x0/action chunks directly.
-  num_inference_steps: 10
+  num_inference_steps: 5
   beta_a: 1.5
   beta_b: 1.0
   time_sampler: "logit_normal"
@@ -93,8 +93,11 @@ policy:
   action_start_10hz: 1
   action_start_50hz: 13
   inference_head: "50hz"
+  inference_t_schedule: "geometric"
+  inference_noise_min: 0.32
+  inference_t_schedule_power: 2.0
 
-  teacher_num_inference_steps: 10
+  teacher_num_inference_steps: 5
   training_stage: 1
 
 ema:

@@ -3,7 +3,8 @@ RDT-style multi-frequency policy with action-chunk parameterization.
 
 The backbone predicts x0/action chunks. Velocity is derived from x0_pred for
 flow-matching losses and ODE sampling:
-  v_pred = (x_t - x0_pred) / t
+  x_t = (1 - t) * noise + t * x0, t=0 is full noise, t=1 is clean
+  v_pred = (x0_pred - x_t) / (1 - t)
 """
 from __future__ import annotations
 
@@ -58,6 +59,10 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         distill_gt_weight: float = 0.1,
         training_stage: int = 1,
         inference_head: str = "50hz",
+        inference_t_schedule: str = "linear",
+        inference_noise_min: float = 0.2,
+        inference_t_schedule_power: float = 2.0,
+        inference_t_min: Optional[float] = None,
         **kwargs,
     ):
         super().__init__()
@@ -133,6 +138,31 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         self.distill_gt_weight = distill_gt_weight
         self.training_stage = training_stage
         self.inference_head = inference_head
+        if inference_t_min is not None:
+            inference_noise_min = inference_t_min
+        if inference_t_schedule not in (
+            "linear",
+            "trailing",
+            "power",
+            "nonlinear",
+            "geometric",
+        ):
+            raise ValueError(
+                f"Unsupported inference_t_schedule={inference_t_schedule}. "
+                "Expected 'linear', 'trailing', 'power', 'nonlinear', or 'geometric'."
+            )
+        if not 0.0 < inference_noise_min < 1.0:
+            raise ValueError(
+                f"inference_noise_min must be in (0, 1), got {inference_noise_min}."
+            )
+        if inference_t_schedule_power <= 0.0:
+            raise ValueError(
+                "inference_t_schedule_power must be positive, "
+                f"got {inference_t_schedule_power}."
+            )
+        self.inference_t_schedule = inference_t_schedule
+        self.inference_noise_min = inference_noise_min
+        self.inference_t_schedule_power = inference_t_schedule_power
         self.use_amp_for_inference = use_amp_for_inference
         if use_amp_for_inference:
             if amp_dtype == "bf16" and torch.cuda.is_bf16_supported():
@@ -153,6 +183,9 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             f"time_sampler={time_sampler}, t_eps={t_eps}, "
             f"noise_scale={noise_scale}, loss_type={loss_type}, "
             f"teacher_num_inference_steps={teacher_num_inference_steps}, "
+            f"inference_t_schedule={inference_t_schedule}, "
+            f"inference_noise_min={inference_noise_min}, "
+            f"inference_t_schedule_power={inference_t_schedule_power}, "
         )
 
     # ------------------------------------------------------------------
@@ -272,7 +305,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         timestep = timestep.to(device=device, dtype=torch.float32)
         if timestep.ndim == 0:
             timestep = timestep[None]
-        return torch.clamp(timestep / 1000.0, min=self.t_eps)
+        return torch.clamp(timestep / 1000.0, min=0.0, max=1.0)
 
     def _velocity_from_x0(
         self,
@@ -281,7 +314,8 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         timestep: Union[torch.Tensor, float, int],
     ):
         t = self._timestep_to_t(timestep, x_t.device).view(-1, 1, 1)
-        return (x_t - x0_pred) / t
+        one_minus_t = torch.clamp(1.0 - t, min=self.t_eps)
+        return (x0_pred - x_t) / one_minus_t
 
     def _velocity_loss_from_x0(
         self,
@@ -328,6 +362,52 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             temporal_cond=temporal_cond,
             freq_mode=freq_mode,
         )
+
+    def _make_inference_t_schedule(
+        self,
+        num_inference_steps: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if num_inference_steps < 1:
+            raise ValueError(
+                f"num_inference_steps must be >= 1, got {num_inference_steps}."
+            )
+
+        if self.inference_t_schedule == "linear":
+            return torch.linspace(
+                0.0, 1.0, num_inference_steps + 1, device=device
+            )
+
+        if self.inference_t_schedule == "trailing":
+            if num_inference_steps == 1:
+                return torch.tensor([0.0, 1.0], device=device)
+            remaining_noise = torch.linspace(
+                1.0,
+                self.inference_noise_min,
+                num_inference_steps,
+                device=device,
+            )
+            clean_t = 1.0 - remaining_noise
+            return torch.cat([clean_t, clean_t.new_ones(1)], dim=0)
+
+        if self.inference_t_schedule == "geometric":
+            if num_inference_steps == 1:
+                return torch.tensor([0.0, 1.0], device=device)
+            step_idx = torch.arange(
+                num_inference_steps,
+                device=device,
+                dtype=torch.float32,
+            )
+            ratio = self.inference_noise_min ** (1.0 / (num_inference_steps - 1))
+            remaining_noise = ratio ** step_idx
+            clean_t = 1.0 - remaining_noise
+            return torch.cat([clean_t, clean_t.new_ones(1)], dim=0)
+
+        ramp = torch.linspace(0.0, 1.0, num_inference_steps + 1, device=device)
+        t_schedule = ramp.pow(self.inference_t_schedule_power)
+        t_schedule[0] = 0.0
+        t_schedule[-1] = 1.0
+        return t_schedule
 
     def sample_noisy_trajectory(
         self,
@@ -377,7 +457,10 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
             raise ValueError("noisy_action must be provided for ODE solve")
         trajectory = noisy_action
         B = trajectory.shape[0]
-        t_schedule = torch.linspace(1.0, 0.0, num_inference_steps + 1, device=trajectory.device)
+        t_schedule = self._make_inference_t_schedule(
+            num_inference_steps,
+            trajectory.device,
+        )
         for i in range(num_inference_steps):
             t_cur = t_schedule[i]
             t_next = t_schedule[i + 1]
@@ -404,7 +487,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
     ):
         B = noisy_action.shape[0]
         t_tensor = torch.full(
-            (B,), 1000.0, device=noisy_action.device, dtype=torch.float32
+            (B,), 0.0, device=noisy_action.device, dtype=torch.float32
         )
         x0_pred = self._predict_x0(
             model, noisy_action, t_tensor, cond, temporal_cond, "50hz"
@@ -479,7 +562,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
                 noisy_trajectory,
                 torch.full(
                     (B,),
-                    1000.0,
+                    0.0,
                     device=noisy_trajectory.device,
                     dtype=torch.float32,
                 ),
@@ -536,13 +619,13 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
     # ------------------------------------------------------------------
     def _sample_timesteps(self, batch_size: int, device: torch.device):
         if self.time_sampler == "logit_normal":
-            jit_t = torch.sigmoid(
+            t = torch.sigmoid(
                 torch.randn(batch_size, device=device) * self.P_std + self.P_mean
             )
-            t = 1.0 - jit_t
         else:
-            t = torch.distributions.Beta(self.beta_a, self.beta_b).sample((batch_size,)).to(device)
-        return t.clamp(min=self.t_eps, max=1.0)
+            noise_t = torch.distributions.Beta(self.beta_a, self.beta_b).sample((batch_size,)).to(device)
+            t = 1.0 - noise_t
+        return t.clamp(min=0.0, max=1.0 - self.t_eps)
 
     def model_forward(self, batch):
         assert "valid_mask" not in batch
@@ -569,7 +652,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         t_exp = t.view(B, 1, 1)
 
         noise_10 = torch.randn_like(nactions_10) * self.noise_scale
-        x_t_10 = t_exp * noise_10 + (1 - t_exp) * nactions_10
+        x_t_10 = (1 - t_exp) * noise_10 + t_exp * nactions_10
         x0_pred_10 = self._predict_x0(
             self.model,
             x_t_10,
@@ -580,7 +663,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         )
 
         noise_50 = torch.randn_like(nactions_50) * self.noise_scale
-        x_t_50 = t_exp * noise_50 + (1 - t_exp) * nactions_50
+        x_t_50 = (1 - t_exp) * noise_50 + t_exp * nactions_50
         x0_pred_50 = self._predict_x0(
             self.model,
             x_t_50,
@@ -627,7 +710,7 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         t_exp = t.view(B, 1, 1)
 
         noise_10 = torch.randn_like(nactions_10) * self.noise_scale
-        x_t_10 = t_exp * noise_10 + (1 - t_exp) * nactions_10
+        x_t_10 = (1 - t_exp) * noise_10 + t_exp * nactions_10
         x0_pred_10 = self._predict_x0(
             self.model,
             x_t_10,
@@ -657,14 +740,14 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
         x0_pred_50 = self._predict_x0(
             self.model,
             noise_50,
-            torch.full((B,), 1000.0, device=noise_50.device, dtype=torch.float32),
+            torch.full((B,), 0.0, device=noise_50.device, dtype=torch.float32),
             obs_tokens,
             temporal_cond_50hz,
             "50hz",
         )
         t_full_noise = torch.full(
             (B,),
-            1000.0,
+            0.0,
             device=noise_50.device,
             dtype=torch.float32,
         )
