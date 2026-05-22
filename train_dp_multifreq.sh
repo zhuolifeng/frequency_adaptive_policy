@@ -14,10 +14,9 @@ SEED="${SEED:-42}"
 EXP_NAME="${EXP_NAME:-dp_multifreq}"
 POLICY_TASK_NAME="${TASK}_${DATASET_VERSION}_dp_multifreq"
 
-# Training epochs
-STAGE1_EPOCHS="${STAGE1_EPOCHS:-600}"
-STAGE2_EPOCHS="${STAGE2_EPOCHS:-300}"
-TOTAL_EPOCHS=$((STAGE1_EPOCHS + STAGE2_EPOCHS))
+# Training
+NUM_EPOCHS="${NUM_EPOCHS:-600}"
+PREDICTION_TYPE="${PREDICTION_TYPE:-v_prediction}"
 
 USE_AMP_FOR_POLICY="${USE_AMP_FOR_POLICY:-False}"
 AMP_DTYPE_FOR_POLICY="${AMP_DTYPE_FOR_POLICY:-bf16}"
@@ -36,9 +35,8 @@ echo "  Dataset:     ${DATASET_PATH}"
 echo "  GPUs:        ${GPU_ID}"
 echo "  Seed:        ${SEED}"
 echo "  Exp name:    ${EXP_NAME}"
-echo "  Stage 1:     ${STAGE1_EPOCHS} epochs (diffusion policy)"
-echo "  Stage 2:     ${STAGE2_EPOCHS} epochs (CTM distillation)"
-echo "  Total:       ${TOTAL_EPOCHS} epochs"
+echo "  Epochs:      ${NUM_EPOCHS}"
+echo "  Prediction:  ${PREDICTION_TYPE}"
 echo "=========================================="
 echo ""
 
@@ -48,16 +46,14 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port ${MAIN_PROC
     task.dataset_path="${DATASET_PATH}" \
     task.name="${POLICY_TASK_NAME}" \
     exp_name="${EXP_NAME}" \
+    prediction_type="${PREDICTION_TYPE}" \
     training.seed="${SEED}" \
-    training.num_epochs=${TOTAL_EPOCHS} \
-    training.stage1_epochs=${STAGE1_EPOCHS} \
-    training.stage2_epochs=${STAGE2_EPOCHS} \
+    training.num_epochs=${NUM_EPOCHS} \
     training.use_amp=${USE_AMP_FOR_POLICY} \
     training.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
     training.debug=${TRAINING_DEBUG} \
     policy.use_amp_for_inference=${USE_AMP_FOR_POLICY} \
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
-    policy.training_stage=1 \
     optimizer.lr=${POLICY_LR} \
     "$@"
 

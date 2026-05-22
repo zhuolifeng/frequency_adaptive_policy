@@ -1,13 +1,10 @@
 """
-Training workspace for multi-frequency diffusion-policy distillation.
+Training workspace for the single-stage multi-frequency diffusion policy.
 
-Stage 1:
-    Standard multi-frequency diffusion-policy training.
-
-Stage 2:
-    One-step DDIM-jump distillation. A frozen copy of the stage-1 DP backbone
-    acts as teacher; an EMA copy of the stop-time-conditioned student acts as
-    the consistency target.
+The policy is trained with standard supervised diffusion losses on both 10Hz
+and 50Hz action chunks. The model target is controlled by the DDIM scheduler's
+``prediction_type`` so the same workspace can train sample/x0 or v_prediction
+ablations.
 """
 
 if __name__ == "__main__":
@@ -38,7 +35,6 @@ from ImplicitRDP.common.json_logger import JsonLogger
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.dataset.base_dataset import BaseImageDataset
 from ImplicitRDP.model.common.lr_scheduler import get_scheduler
-from ImplicitRDP.model.diffusion.ema_model import EMAModel
 from ImplicitRDP.policy.dp_multifreq_policy import DPMultiFreqPolicy
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 
@@ -66,118 +62,20 @@ class TrainDPMultiFreqWorkspace(BaseWorkspace):
             raise ValueError("DP multi-frequency training requires training.use_ema=True")
 
         optimizer_cfg = OmegaConf.to_container(cfg.optimizer, resolve=True)
-        optimizer_cfg.pop("stage2_lr", None)
-        optimizer_cfg.pop("stage2_obs_encoder_lr", None)
         self.optimizer = self.model.get_optimizer(**optimizer_cfg)
 
         self.global_step = 0
         self.epoch = 0
-        self.scaler = None
-        if cfg.training.get("use_amp", False):
-            self.scaler = GradScaler()
+        self.scaler = GradScaler() if cfg.training.get("use_amp", False) else None
 
         if not cfg.training.resume:
             self.exclude_keys = ["optimizer", "scaler"]
 
-        self.current_stage = 1
-        self.stage2_ema = None  # Will be created when entering stage 2
-        self.stage1_epochs = cfg.training.get("stage1_epochs", 600)
-        self.stage2_epochs = cfg.training.get("stage2_epochs", 200)
         logger.info(
-            "Two-stage DP multi-frequency training: "
-            f"stage1_epochs={self.stage1_epochs}, stage2_epochs={self.stage2_epochs}"
+            "Single-stage DP multi-frequency training: "
+            f"num_epochs={cfg.training.num_epochs}, "
+            f"prediction_type={cfg.policy.noise_scheduler.prediction_type}"
         )
-
-    def _enter_stage2(self, cfg, accelerator, train_dataloader, val_dataloader, device):
-        unwrapped_model: DPMultiFreqPolicy = accelerator.unwrap_model(self.model)
-
-        teacher_model = copy.deepcopy(unwrapped_model.model)
-        teacher_model.requires_grad_(False)
-        teacher_model.eval()
-        unwrapped_model.set_teacher_model(teacher_model)
-        unwrapped_model.prepare_stage2_student()
-        unwrapped_model.model.requires_grad_(False)
-        unwrapped_model.model.eval()
-        # Freeze obs_encoder in stage 2: visual features are already learned,
-        # only train ctm_model (student) and RNN encoders
-        unwrapped_model.obs_encoder.requires_grad_(False)
-        unwrapped_model.obs_encoder.eval()
-        unwrapped_model.set_training_stage(2)
-
-        if self.ema_model is not None:
-            self.ema_model.load_state_dict(unwrapped_model.state_dict(), strict=False)
-            self.ema_model.to(device)
-            self.ema_model.prepare_stage2_student()
-            self.ema_model.model.requires_grad_(False)
-            self.ema_model.model.eval()
-            self.ema_model.obs_encoder.requires_grad_(False)
-            self.ema_model.obs_encoder.eval()
-            self.ema_model.set_training_stage(2)
-            unwrapped_model.set_ema_model_ref(self.ema_model.ctm_model)
-            self.ema_model.set_teacher_model(teacher_model)
-            self.ema_model.set_ema_model_ref(self.ema_model.ctm_model)
-
-        self.current_stage = 2
-
-        # Reset EMA for stage 2 with CTM-specific initial decay
-        # (low initial decay = EMA closely tracks student early on)
-        ctm_ema_initial_decay = getattr(unwrapped_model, "ctm_ema_initial_decay", 0.0)
-        ema_cfg = OmegaConf.to_container(cfg.ema, resolve=True)
-        ema_cfg["min_value"] = ctm_ema_initial_decay
-        self.stage2_ema = EMAModel(model=self.ema_model, **{
-            k: v for k, v in ema_cfg.items() if k != "_target_"
-        })
-        # Reset optimization_step so decay ramp starts fresh for stage 2
-        self.stage2_ema.optimization_step = 0
-        logger.info(
-            f"Stage 2 EMA reset: initial_decay={ctm_ema_initial_decay}, "
-            f"will ramp up to max_value={ema_cfg.get('max_value', 0.9999)}"
-        )
-
-        optimizer_cfg = OmegaConf.to_container(cfg.optimizer, resolve=True)
-        stage2_lr = optimizer_cfg.pop("stage2_lr", 1.0e-5)
-        # Remove obs_encoder keys — obs_encoder is frozen in stage 2,
-        # get_optimizer skips it, so these would be unused dead config.
-        optimizer_cfg.pop("stage2_obs_encoder_lr", None)
-        optimizer_cfg.pop("obs_encoder_lr", None)
-        optimizer_cfg["lr"] = stage2_lr
-        self.optimizer = unwrapped_model.get_optimizer(**optimizer_cfg)
-
-        if self.scaler is not None:
-            self.scaler = GradScaler()
-
-        num_training_steps = (
-            len(train_dataloader) * self.stage2_epochs
-        ) // cfg.training.gradient_accumulate_every
-        lr_scheduler = get_scheduler(
-            cfg.training.lr_scheduler,
-            optimizer=self.optimizer,
-            num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=max(1, num_training_steps),
-            last_epoch=-1,
-        )
-
-        prepared = accelerator.prepare(
-            train_dataloader,
-            val_dataloader,
-            unwrapped_model,
-            self.optimizer,
-            lr_scheduler,
-        )
-        train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = prepared
-
-        if accelerator.state.num_processes > 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                accelerator.unwrap_model(self.model),
-                device_ids=[self.model.device],
-                find_unused_parameters=True,
-            )
-
-        logger.info(
-            f"Entered Stage 2 DDIM distillation with lr={stage2_lr}, "
-            f"obs_encoder=frozen"
-        )
-        return train_dataloader, val_dataloader, lr_scheduler
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -219,20 +117,18 @@ class TrainDPMultiFreqWorkspace(BaseWorkspace):
         self.model.set_normalizer(normalizer)
         self.ema_model.set_normalizer(normalizer)
 
-        total_epochs = self.stage1_epochs + self.stage2_epochs
-        # Stage 1 LR scheduler: only covers stage1_epochs so cosine decay
-        # completes fully before entering stage 2 (which creates its own scheduler)
+        num_training_steps = (
+            len(train_dataloader) * cfg.training.num_epochs
+        ) // cfg.training.gradient_accumulate_every
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(
-                len(train_dataloader) * max(1, self.stage1_epochs)
-            ) // cfg.training.gradient_accumulate_every,
+            num_training_steps=max(1, num_training_steps),
             last_epoch=self.global_step - 1,
         )
 
-        ema: EMAModel = hydra.utils.instantiate(cfg.ema, model=self.ema_model)
+        ema = hydra.utils.instantiate(cfg.ema, model=self.ema_model)
 
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, "checkpoints"),
@@ -263,50 +159,19 @@ class TrainDPMultiFreqWorkspace(BaseWorkspace):
             cfg.training.max_val_steps = 3
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
-            self.stage1_epochs = min(self.stage1_epochs, 1)
-            self.stage2_epochs = min(self.stage2_epochs, 1)
-            total_epochs = self.stage1_epochs + self.stage2_epochs
+            cfg.training.num_epochs = min(cfg.training.num_epochs, 1)
 
         log_path = os.path.join(self.output_dir, "logs.json.txt")
-        logger.info("Starting DP multi-frequency training...")
+        logger.info("Starting DP multi-frequency supervised diffusion training...")
 
-        stage2_started = False
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(total_epochs):
-                if local_epoch_idx < self.stage1_epochs:
-                    self.current_stage = 1
-                else:
-                    if not stage2_started:
-                        if accelerator.is_main_process and self.stage1_epochs > 0:
-                            stage1_path = os.path.join(
-                                self.output_dir, "checkpoints", "stage1_final.ckpt"
-                            )
-                            model_ddp = self.model
-                            self.model = accelerator.unwrap_model(self.model)
-                            self.save_checkpoint(path=stage1_path)
-                            self.model = model_ddp
-                            logger.info(f"Saved Stage-1 checkpoint to {stage1_path}")
-                        train_dataloader, val_dataloader, lr_scheduler = self._enter_stage2(
-                            cfg, accelerator, train_dataloader, val_dataloader, device
-                        )
-                        stage2_started = True
-                    self.current_stage = 2
-
+            for _ in range(cfg.training.num_epochs):
                 unwrapped_model: DPMultiFreqPolicy = accelerator.unwrap_model(self.model)
-                unwrapped_model.set_training_stage(self.current_stage)
-                unwrapped_model.update_progress(local_epoch_idx / max(1, total_epochs))
-                if self.current_stage == 2:
-                    unwrapped_model.set_ema_model_ref(self.ema_model.ctm_model)
-                    unwrapped_model.model.eval()
-                    unwrapped_model.model.requires_grad_(False)
+                unwrapped_model.set_training_stage(1)
+                unwrapped_model.update_progress(self.epoch / max(1, cfg.training.num_epochs))
 
                 self.model.train()
-                if cfg.training.freeze_encoder and self.current_stage == 1:
-                    unwrapped_model.obs_encoder.eval()
-                    unwrapped_model.obs_encoder.requires_grad_(False)
-                if self.current_stage == 2:
-                    # Stage 2: obs_encoder is frozen (visual features already learned)
-                    # Must re-apply after self.model.train() which enables train mode on all submodules
+                if cfg.training.freeze_encoder:
                     unwrapped_model.obs_encoder.eval()
                     unwrapped_model.obs_encoder.requires_grad_(False)
 
@@ -380,11 +245,7 @@ class TrainDPMultiFreqWorkspace(BaseWorkspace):
                                 self.optimizer.step()
                             self.optimizer.zero_grad(set_to_none=True)
                             lr_scheduler.step()
-                            # Use stage2-specific EMA (with low initial decay) during distillation
-                            if self.current_stage == 2 and self.stage2_ema is not None:
-                                self.stage2_ema.step(accelerator.unwrap_model(self.model))
-                            else:
-                                ema.step(accelerator.unwrap_model(self.model))
+                            ema.step(accelerator.unwrap_model(self.model))
 
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
@@ -394,7 +255,7 @@ class TrainDPMultiFreqWorkspace(BaseWorkspace):
                             "global_step": self.global_step,
                             "epoch": self.epoch,
                             "lr": lr_scheduler.get_last_lr()[0],
-                            "training_stage": float(self.current_stage),
+                            "training_stage": 1.0,
                         }
                         for key, value in loss_dict.items():
                             step_log[f"train_{key}"] = value
@@ -417,13 +278,7 @@ class TrainDPMultiFreqWorkspace(BaseWorkspace):
 
                 policy = self.ema_model
                 policy.eval()
-                if self.current_stage == 2:
-                    policy.set_training_stage(2)
-                    # NOTE: do NOT call policy.set_ema_model_ref for validation.
-                    # Stage 2 validation uses DSM-only loss (pred vs ground truth)
-                    # instead of full CTM loss (which would compare EMA vs EMA).
-                else:
-                    policy.set_training_stage(1)
+                policy.set_training_stage(1)
 
                 if (
                     self.epoch % cfg.training.val_every == 0
@@ -443,14 +298,7 @@ class TrainDPMultiFreqWorkspace(BaseWorkspace):
                                     batch, lambda x: x.to(device, non_blocking=True)
                                 )
                                 with autocast(enabled=use_amp, dtype=amp_dtype):
-                                    if self.current_stage == 2:
-                                        # Stage 2: compute DSM-only loss as validation
-                                        # metric. This measures how well the student
-                                        # predicts x0 from noisy input vs ground truth,
-                                        # avoiding the meaningless CTM(EMA vs EMA) comparison.
-                                        raw_loss = policy.compute_val_loss_stage2(batch)
-                                    else:
-                                        raw_loss, _ = policy.compute_loss(batch)
+                                    raw_loss, _ = policy.compute_loss(batch)
                                 val_losses.append(raw_loss.item())
                                 if (
                                     cfg.training.max_val_steps is not None

@@ -145,21 +145,13 @@ def main(cfg):
     if not isinstance(policy, DPMultiFreqPolicy):
         raise ValueError(f"Expected DPMultiFreqPolicy, got {type(policy)}")
 
-    configured_training_stage = cfg.get("training_stage", None)
-    if configured_training_stage is not None:
-        policy.set_training_stage(int(configured_training_stage))
-        logger.info(f"Override policy.training_stage -> {int(configured_training_stage)}")
+    policy.set_training_stage(1)
 
     configured_inference_steps = cfg.get("num_inference_steps", None)
     if configured_inference_steps is not None:
         original_inference_steps = policy.num_inference_steps
         policy.num_inference_steps = int(configured_inference_steps)
         logger.info(f"Override policy.num_inference_steps: {original_inference_steps} -> {policy.num_inference_steps}")
-
-    configured_use_ctm = cfg.get("use_ctm_inference", None)
-    if configured_use_ctm is not None:
-        policy.use_ctm_inference = bool(configured_use_ctm)
-        logger.info(f"Override policy.use_ctm_inference -> {policy.use_ctm_inference}")
 
     device = torch.device(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     policy.eval().to(device)

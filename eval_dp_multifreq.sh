@@ -15,8 +15,7 @@ DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS2513
 GPU_DEVICE="${GPU_DEVICE:-cuda:2}"
 VIDEO_FPS="${VIDEO_FPS:-1}"
 NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-2}"
-TRAINING_STAGE="${TRAINING_STAGE:-2}"
-USE_CTM_INFERENCE="${USE_CTM_INFERENCE:-True}"
+PREDICTION_TYPE="${PREDICTION_TYPE:-v_prediction}"
 OUTPUT_DIR="${OUTPUT_DIR:-evaluations_dp_multifreq_2steps}"
 
 echo "=========================================="
@@ -27,8 +26,7 @@ echo "Checkpoint:    ${CKPT_PATH}"
 echo "Dataset:       ${DATASET_PATH}"
 echo "GPU device:    ${GPU_DEVICE}"
 echo "Inference steps: ${NUM_INFERENCE_STEPS}"
-echo "Training stage:  ${TRAINING_STAGE}"
-echo "Use CTM inference: ${USE_CTM_INFERENCE}"
+echo "Prediction:    ${PREDICTION_TYPE}"
 echo "Video FPS:     ${VIDEO_FPS}"
 echo "Output dir:    ${OUTPUT_DIR}"
 echo ""
@@ -40,10 +38,9 @@ python eval_dp_multifreq.py \
     --config-name "${CONFIG_NAME}" \
     "task=real_${TASK}_image_wrench_offline_10fps_acp" \
     "task.dataset_path=${DATASET_PATH}" \
+    "prediction_type=${PREDICTION_TYPE}" \
     "+use_full_dataset=True" \
     "+num_inference_steps=${NUM_INFERENCE_STEPS}" \
-    "+training_stage=${TRAINING_STAGE}" \
-    "+use_ctm_inference=${USE_CTM_INFERENCE}" \
     "+video_fps=${VIDEO_FPS}" \
     "+device=${GPU_DEVICE}" \
     "task.dataset.val_ratio=0.0" \
