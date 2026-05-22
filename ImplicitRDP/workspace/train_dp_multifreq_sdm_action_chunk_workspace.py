@@ -299,6 +299,17 @@ class TrainDPMultiFreqSDMActionChunkWorkspace(BaseWorkspace):
                         self.model = model_ddp
                         logger.info(f"Saved Stage 1 checkpoint to {stage1_ckpt_path}")
 
+                    if (
+                        self.ema_model is not None
+                        and cfg.training.get("stage2_init_generator_from_ema", True)
+                    ):
+                        unwrapped_model.model.load_state_dict(
+                            copy.deepcopy(self.ema_model.model.state_dict())
+                        )
+                        logger.info(
+                            "Initialized Stage 2 generator backbone from Stage 1 EMA model"
+                        )
+
                     self._build_stage2_teacher(unwrapped_model, device)
                     self._configure_stage2_modules(unwrapped_model, cfg)
                     unwrapped_model.prepare_sdm_stage2()
@@ -491,8 +502,7 @@ class TrainDPMultiFreqSDMActionChunkWorkspace(BaseWorkspace):
                                     self.dynamic_optimizer.step()
                                 self.optimizer.zero_grad(set_to_none=True)
                                 self.dynamic_optimizer.zero_grad(set_to_none=True)
-                                if update_generator:
-                                    lr_scheduler.step()
+                                lr_scheduler.step()
                                 dynamic_lr_scheduler.step()
                                 if ema is not None:
                                     ema.step(accelerator.unwrap_model(self.model))
@@ -567,6 +577,8 @@ class TrainDPMultiFreqSDMActionChunkWorkspace(BaseWorkspace):
                             "lr": lr_scheduler.get_last_lr()[0],
                             "training_stage": float(current_stage),
                         }
+                        if current_stage == 2 and dynamic_lr_scheduler is not None:
+                            step_log["dynamic_lr"] = dynamic_lr_scheduler.get_last_lr()[0]
                         for key, value in loss_dict.items():
                             step_log[f"train_{key}"] = value
 

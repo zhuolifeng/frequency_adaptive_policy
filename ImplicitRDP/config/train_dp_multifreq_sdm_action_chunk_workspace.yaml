@@ -178,6 +178,7 @@ training:
   stage1_epochs: 900
   stage2_epochs: 400
   stage2_ema_rate: 0.9999
+  stage2_init_generator_from_ema: True
   num_epochs: ${eval:'${training.stage1_epochs}+${training.stage2_epochs}'}
   gradient_accumulate_every: 1
   max_grad_norm: 1.0
