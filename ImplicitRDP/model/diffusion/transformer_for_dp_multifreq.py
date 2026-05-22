@@ -1,15 +1,13 @@
 """
-Multi-frequency transformer backbone for diffusion-policy training and
-DDIM-jump distillation.
+Single-stage multi-frequency transformer backbone for diffusion-policy training.
 
-The same class supports the stage-1 teacher and stage-2 student:
+Condition tokens are only:
+    [time_emb | obs_tokens]
 
-    stage 1: [time_emb | optional freq_emb | obs_tokens]
-    stage 2: [time_emb | stop_time_emb | optional freq_emb | obs_tokens]
-
-The network output follows the policy scheduler prediction type, typically
-``v_prediction``. The policy converts that output into x0/epsilon before
-applying DDIM transitions.
+``freq_mode`` is still used to choose 10Hz/50Hz positional indices on the shared
+50Hz grid, but it is not embedded as a condition token. The network output
+follows the policy scheduler prediction type: sample/x0, epsilon, or
+v_prediction.
 """
 from typing import Optional, Tuple, Union
 import logging
@@ -48,8 +46,6 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
         freq_ratio: int = 5,
         action_offset_10hz: int = 8,
         temporal_offset_10hz: int = 4,
-        use_freq_token: bool = True,
-        use_stop_time: bool = False,
     ) -> None:
         super().__init__()
 
@@ -69,9 +65,6 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
         self.pos_emb = nn.Parameter(torch.zeros(1, pos_emb_len, n_emb))
 
         self.time_emb = SinusoidalPosEmb(n_emb)
-        self.use_freq_token = use_freq_token
-        self.use_stop_time = use_stop_time
-        self.freq_emb = nn.Embedding(2, n_emb) if use_freq_token else None
 
         self.cond_obs_emb = None
         if obs_as_cond:
@@ -235,7 +228,6 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
         self,
         sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
-        stop_timestep: Optional[Union[torch.Tensor, float, int]] = None,
         cond: Optional[torch.Tensor] = None,
         temporal_cond: Optional[torch.Tensor] = None,
         freq_mode: str = "10hz",
@@ -247,20 +239,7 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
         timesteps = self._expand_timesteps(timestep, B, device)
         time_emb = self.time_emb(timesteps).unsqueeze(1)
 
-        cond_tokens = [time_emb]
-        if self.use_stop_time:
-            if stop_timestep is None:
-                stop_timesteps = torch.zeros_like(timesteps)
-            else:
-                stop_timesteps = self._expand_timesteps(stop_timestep, B, device)
-            cond_tokens.append(self.time_emb(stop_timesteps).unsqueeze(1))
-
-        if self.use_freq_token:
-            freq_id = torch.tensor([0 if freq_mode == "10hz" else 1], device=device)
-            freq_token = self.freq_emb(freq_id).unsqueeze(0).expand(B, -1, -1)
-            cond_tokens.append(freq_token)
-
-        cond_emb = torch.cat(cond_tokens, dim=1)
+        cond_emb = time_emb
         if self.cond_obs_emb is not None and cond is not None:
             cond_obs_emb = self.cond_obs_emb(cond)
             cond_emb = torch.cat([cond_emb, cond_obs_emb], dim=1)
