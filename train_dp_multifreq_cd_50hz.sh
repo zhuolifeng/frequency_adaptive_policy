@@ -7,21 +7,22 @@ GPU_ID="${GPU_ID:-0,1,2,3,4,5,6,7}"
 TASK="${TASK:-dual_switch}"
 DATASET_VERSION="${DATASET_VERSION:-v6}"
 ROUND="${ROUND:-1}"
-DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+DATASET_PATH="${DATASET_PATH:-/mnt/workspace/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 SEED="${SEED:-42}"
 
 EXP_NAME="${EXP_NAME:-dp_multifreq_cd_50hz}"
 POLICY_TASK_NAME="${TASK}_${DATASET_VERSION}_dp_multifreq_cd_50hz"
 
-STAGE1_CKPT_PATH="${STAGE1_CKPT_PATH:-}"
+STAGE1_CKPT_PATH="${STAGE1_CKPT_PATH:-/mnt/workspace/users/lifeng/frequency_adaptive_policy_flow/latest.ckpt}"
 STAGE1_SOURCE_KEY="${STAGE1_SOURCE_KEY:-ema_model}"
 
 NUM_EPOCHS="${NUM_EPOCHS:-500}"
 PREDICTION_TYPE="${PREDICTION_TYPE:-sample}"
 CD_TIMESTEP_GRID="${CD_TIMESTEP_GRID:-[99,79,59,39,19,0]}"
+CD_TEACHER_ROLLOUT_STEPS="${CD_TEACHER_ROLLOUT_STEPS:-2}"
 CD_WEIGHT="${CD_WEIGHT:-1.0}"
-DSM_WEIGHT="${DSM_WEIGHT:-0.0}"
+DSM_WEIGHT="${DSM_WEIGHT:-1.0}"
 
 POLICY_LR="${POLICY_LR:-1.0e-5}"
 LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-500}"
@@ -53,6 +54,7 @@ echo "  Source key:  ${STAGE1_SOURCE_KEY}"
 echo "  Epochs:      ${NUM_EPOCHS}"
 echo "  Prediction:  ${PREDICTION_TYPE}"
 echo "  CD grid:     ${CD_TIMESTEP_GRID}"
+echo "  Teacher steps:${CD_TEACHER_ROLLOUT_STEPS}"
 echo "  CD weight:   ${CD_WEIGHT}"
 echo "  DSM weight:  ${DSM_WEIGHT}"
 echo "=========================================="
@@ -77,6 +79,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port ${MAIN_PROC
     policy.use_amp_for_inference=${USE_AMP_FOR_POLICY} \
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
     policy.cd_timestep_grid="${CD_TIMESTEP_GRID}" \
+    policy.cd_teacher_rollout_steps=${CD_TEACHER_ROLLOUT_STEPS} \
     policy.cd_weight=${CD_WEIGHT} \
     policy.dsm_weight=${DSM_WEIGHT} \
     optimizer.lr=${POLICY_LR} \
