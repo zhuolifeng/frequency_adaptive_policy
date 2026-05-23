@@ -97,6 +97,7 @@ policy:
   inference_head: "50hz"
 
   cd_timestep_grid: [99, 79, 59, 39, 19, 0]
+  cd_teacher_rollout_steps: 2
   cd_weight: 1.0
   dsm_weight: 0.0
 
@@ -153,6 +154,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
+  backend: wandb
   project: dp_multifreq_cd_50hz_policy
   resume: False
   mode: online

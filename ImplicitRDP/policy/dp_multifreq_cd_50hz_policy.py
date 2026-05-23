@@ -18,6 +18,7 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         self,
         *args,
         cd_timestep_grid: List[int] = (99, 79, 59, 39, 19, 0),
+        cd_teacher_rollout_steps: int = 2,
         cd_weight: float = 1.0,
         dsm_weight: float = 0.0,
         **kwargs,
@@ -33,6 +34,9 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
             raise ValueError(
                 "cd_timestep_grid must be strictly descending, e.g. [99, 79, ..., 0]."
             )
+        if cd_teacher_rollout_steps < 1:
+            raise ValueError("cd_teacher_rollout_steps must be >= 1.")
+        self.cd_teacher_rollout_steps = int(cd_teacher_rollout_steps)
         self.cd_weight = float(cd_weight)
         self.dsm_weight = float(dsm_weight)
         self.training_stage = 2
@@ -50,6 +54,39 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         grid = torch.tensor(self.cd_timestep_grid, dtype=torch.long, device=device)
         pair_idx = torch.randint(0, len(self.cd_timestep_grid) - 1, (batch_size,), device=device)
         return grid[pair_idx], grid[pair_idx + 1]
+
+    def _teacher_rollout_to_timestep(
+        self,
+        teacher_policy: DPMultiFreqPolicy,
+        sample: torch.Tensor,
+        start_timestep: torch.Tensor,
+        target_timestep: torch.Tensor,
+        obs_tokens: torch.Tensor,
+        temporal_cond: torch.Tensor,
+    ) -> torch.Tensor:
+        x = sample
+        cur_t = start_timestep
+        for step_idx in range(1, self.cd_teacher_rollout_steps + 1):
+            next_t = (
+                start_timestep.float()
+                + (target_timestep.float() - start_timestep.float())
+                * (step_idx / self.cd_teacher_rollout_steps)
+            ).round().long()
+            next_t = torch.maximum(next_t, target_timestep)
+            next_t = torch.minimum(next_t, cur_t - 1)
+            if step_idx == self.cd_teacher_rollout_steps:
+                next_t = target_timestep
+
+            teacher_out = teacher_policy.model(
+                x,
+                cur_t,
+                cond=obs_tokens,
+                temporal_cond=temporal_cond,
+                freq_mode="50hz",
+            )
+            x = teacher_policy._ddim_jump_to(x, teacher_out, cur_t, next_t)
+            cur_t = next_t
+        return x
 
     def _prepare_50hz_inputs(self, batch: Dict[str, torch.Tensor]):
         nobs = self.normalizer.normalize(batch["obs"])
@@ -82,14 +119,14 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         x_t = self.noise_scheduler.add_noise(x0_50hz, noise, t)
 
         with torch.no_grad():
-            teacher_out_t = teacher_policy.model(
-                x_t,
-                t,
-                cond=obs_tokens,
+            x_u = self._teacher_rollout_to_timestep(
+                teacher_policy=teacher_policy,
+                sample=x_t,
+                start_timestep=t,
+                target_timestep=u,
+                obs_tokens=obs_tokens,
                 temporal_cond=temporal_cond_50hz,
-                freq_mode="50hz",
             )
-            x_u = teacher_policy._ddim_jump_to(x_t, teacher_out_t, t, u)
 
             target_out_u = target_policy.model(
                 x_u,
@@ -117,6 +154,7 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
             "total_loss": total_loss.item(),
             "cd_t_mean": t.float().mean().item(),
             "cd_u_mean": u.float().mean().item(),
+            "cd_teacher_rollout_steps": float(self.cd_teacher_rollout_steps),
             "training_stage": 2.0,
         }
 
@@ -135,6 +173,65 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
 
     def forward(self, batch, teacher_policy, target_policy):
         return self.compute_cd_loss(batch, teacher_policy, target_policy)
+
+    def _ddim_sample(
+        self,
+        model,
+        cond=None,
+        temporal_cond=None,
+        freq_mode: str = "10hz",
+        horizon: int = 16,
+        generator=None,
+        num_inference_steps: Optional[int] = None,
+        noisy_trajectory=None,
+        **kwargs,
+    ):
+        steps = self.num_inference_steps if num_inference_steps is None else num_inference_steps
+        if steps != 1:
+            return super()._ddim_sample(
+                model,
+                cond=cond,
+                temporal_cond=temporal_cond,
+                freq_mode=freq_mode,
+                horizon=horizon,
+                generator=generator,
+                num_inference_steps=num_inference_steps,
+                noisy_trajectory=noisy_trajectory,
+                **kwargs,
+            )
+
+        if noisy_trajectory is None:
+            trajectory = torch.randn(
+                size=(cond.shape[0], horizon, self.action_dim),
+                dtype=cond.dtype,
+                device=cond.device,
+                generator=generator,
+            )
+        else:
+            trajectory = noisy_trajectory
+
+        # Diffusers DDIM uses timestep 0 for one-step leading spacing, but CD
+        # trains the student at the first grid timestep, e.g. 99.
+        t_value = int(self.cd_timestep_grid[0])
+        self.noise_scheduler.set_timesteps(1, device=trajectory.device)
+        t = torch.tensor(t_value, dtype=torch.long, device=trajectory.device)
+        t_batch = torch.full(
+            (trajectory.shape[0],),
+            t_value,
+            dtype=torch.long,
+            device=trajectory.device,
+        )
+        model_output = model(
+            trajectory,
+            t_batch,
+            cond=cond,
+            temporal_cond=temporal_cond,
+            freq_mode=freq_mode,
+        )
+        trajectory = self.noise_scheduler.step(
+            model_output, t, trajectory, generator=generator, **self.kwargs
+        ).prev_sample
+        return trajectory
 
     def _predict_action(
         self,

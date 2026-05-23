@@ -31,6 +31,7 @@ from omegaconf import OmegaConf
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
+from ImplicitRDP.common.checkpoint_util import TopKCheckpointManager
 from ImplicitRDP.common.json_logger import JsonLogger
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.dataset.base_dataset import BaseImageDataset
@@ -115,6 +116,42 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
             self.ema_model.load_state_dict(source_state, strict=True)
         logger.info(f"Loaded stage-1 {source_key} weights from {ckpt_path}")
 
+    def _make_accelerator(self, cfg):
+        log_backend = cfg.logging.get("backend", "tensorboard")
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        if log_backend == "tensorboard":
+            tb_log_dir = os.path.join(self.output_dir, "tb_logs")
+            accelerator = Accelerator(
+                log_with="tensorboard",
+                project_dir=tb_log_dir,
+                kwargs_handlers=[ddp_kwargs],
+            )
+        elif log_backend == "wandb":
+            accelerator = Accelerator(
+                log_with="wandb",
+                kwargs_handlers=[ddp_kwargs],
+            )
+        elif log_backend in ("none", "disabled", None):
+            accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+        else:
+            raise ValueError(
+                f"Unsupported logging.backend={log_backend}. "
+                "Expected 'tensorboard', 'wandb', or 'none'."
+            )
+
+        if log_backend == "wandb":
+            wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
+            wandb_cfg.pop("project", None)
+            wandb_cfg.pop("backend", None)
+            accelerator.init_trackers(
+                project_name=cfg.logging.project,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                init_kwargs={"wandb": wandb_cfg},
+            )
+        elif log_backend == "tensorboard":
+            accelerator.init_trackers(project_name=cfg.logging.project)
+        return accelerator
+
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
@@ -128,15 +165,8 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
         else:
             amp_dtype = None
 
-        tb_log_dir = os.path.join(self.output_dir, "tb_logs")
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-        accelerator = Accelerator(
-            log_with="tensorboard",
-            project_dir=tb_log_dir,
-            kwargs_handlers=[ddp_kwargs],
-        )
+        accelerator = self._make_accelerator(cfg)
         cuda_count = accelerator.num_processes
-        accelerator.init_trackers(project_name=cfg.logging.project)
 
         self._load_stage1_models(cfg.training.stage1_ckpt_path, load_student=True)
 
@@ -178,6 +208,11 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
         )
 
         ema = hydra.utils.instantiate(cfg.ema, model=self.ema_model)
+
+        topk_manager = TopKCheckpointManager(
+            save_dir=os.path.join(self.output_dir, "checkpoints"),
+            **cfg.checkpoint.topk,
+        )
 
         train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = (
             accelerator.prepare(
@@ -333,7 +368,12 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
                 ):
                     model_ddp = self.model
                     self.model = accelerator.unwrap_model(self.model)
-                    self.save_checkpoint()
+                    if cfg.checkpoint.save_last_ckpt:
+                        self.save_checkpoint()
+                    metric_dict = {k.replace("/", "_"): v for k, v in step_log.items()}
+                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                    if topk_ckpt_path is not None:
+                        self.save_checkpoint(path=topk_ckpt_path)
                     self.model = model_ddp
 
                 accelerator.log(step_log, step=self.global_step)
