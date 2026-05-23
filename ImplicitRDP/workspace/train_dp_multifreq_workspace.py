@@ -334,10 +334,10 @@ class TrainDPMultiFreqWorkspace(BaseWorkspace):
                 self.epoch += 1
 
         if accelerator.is_main_process:
-            final_path = os.path.join(self.output_dir, "checkpoints", "dp_multifreq_final.ckpt")
+            final_path = os.path.join(self.output_dir, "checkpoints", "stage1_final.ckpt")
             model_ddp = self.model
             self.model = accelerator.unwrap_model(self.model)
-            self.save_checkpoint(path=final_path)
+            self.save_checkpoint(path=final_path, use_thread=False)
             self.model = model_ddp
             logger.info(f"Saved final DP multi-frequency checkpoint to {final_path}")
 

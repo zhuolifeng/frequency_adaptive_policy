@@ -244,6 +244,15 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         target_timestep: torch.Tensor,
     ):
         pred_x0, pred_eps = self._prediction_to_x0_eps(sample, model_output, timestep)
+        if self.noise_scheduler.config.clip_sample:
+            clip_range = getattr(self.noise_scheduler.config, "clip_sample_range", 1.0)
+            pred_x0 = pred_x0.clamp(
+                -clip_range,
+                clip_range,
+            )
+            _, beta_prod = self._get_variance_terms(timestep, sample)
+            alpha_prod = 1.0 - beta_prod
+            pred_eps = (sample - alpha_prod.sqrt() * pred_x0) / beta_prod.sqrt().clamp_min(1e-12)
         alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
             device=sample.device, dtype=sample.dtype
         )

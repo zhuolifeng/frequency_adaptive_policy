@@ -8,18 +8,18 @@ CONFIG_NAME="${CONFIG_NAME:-train_dp_multifreq_sdm_action_chunk_workspace}"
 POLICY_TYPE="${POLICY_TYPE:-dp_sdm_action_chunk}"
 
 # Checkpoint path. Override with CKPT_PATH=/path/to/checkpoint.ckpt.
-CKPT_PATH="${CKPT_PATH:-/path/to/dp_multifreq_sdm_action_chunk/checkpoints/latest.ckpt}"
+CKPT_PATH="${CKPT_PATH:-/mnt/workspace/users/lifeng/frequency_adaptive_policy_flow/data/outputs/2026.05.22/18.11.26_train_dp_multifreq_sdm_action_chunk_workspace_dual_switch_v6_dp_multifreq_sdm_action_chunk/checkpoints/stage1_final.ckpt}"
 
 # Dataset path. Override with DATASET_PATH=/path/to/zarr.
-DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+DATASET_PATH="${DATASET_PATH:-/mnt/workspace/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
-GPU_DEVICE="${GPU_DEVICE:-cuda:5}"
+GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
 
 VIDEO_FPS="${VIDEO_FPS:-1}"
-NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-1}"
-TRAINING_STAGE="${TRAINING_STAGE:-2}"
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-5}"
+TRAINING_STAGE="${TRAINING_STAGE:-1}"
 
-OUTPUT_DIR="${OUTPUT_DIR:-evaluations_dp_multifreq_sdm_action_chunk_${NUM_INFERENCE_STEPS}steps}"
+OUTPUT_DIR="${OUTPUT_DIR:-evaluations_dp_multifreq_sdm_action_chunk_stage_${TRAINING_STAGE}_${NUM_INFERENCE_STEPS}steps_rightlr}"
 
 echo "=========================================="
 echo "DP MultiFreq SDM Action Chunk Evaluation"
