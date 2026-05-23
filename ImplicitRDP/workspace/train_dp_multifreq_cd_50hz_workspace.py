@@ -26,7 +26,7 @@ import hydra
 import numpy as np
 import torch
 import tqdm
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from omegaconf import OmegaConf
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
@@ -129,7 +129,12 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
             amp_dtype = None
 
         tb_log_dir = os.path.join(self.output_dir, "tb_logs")
-        accelerator = Accelerator(log_with="tensorboard", project_dir=tb_log_dir)
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        accelerator = Accelerator(
+            log_with="tensorboard",
+            project_dir=tb_log_dir,
+            kwargs_handlers=[ddp_kwargs],
+        )
         cuda_count = accelerator.num_processes
         accelerator.init_trackers(project_name=cfg.logging.project)
 
