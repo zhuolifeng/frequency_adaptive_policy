@@ -81,7 +81,7 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         self.scaler = GradScaler() if cfg.training.get("use_amp", False) else None
 
         if not cfg.training.resume:
-            self.exclude_keys = ["optimizer", "scaler"]
+            self.exclude_keys = ["optimizer", "scaler", "teacher_model"]
 
         logger.info("DP MultiFreq CD 50Hz Confidence training:")
         logger.info(f"  Stage 1: {self.stage1_epochs} epochs, lr={cfg.optimizer.stage1_lr}")
@@ -200,6 +200,16 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         self.save_checkpoint(path=path, use_thread=False)
         self.model = model_ddp
         logger.info(f"Saved checkpoint: {path}")
+
+    def _reset_ema(self, ema):
+        ema.decay = 0.0
+        ema.optimization_step = 0
+        logger.info("Reset EMA decay schedule for new stage")
+
+    def _sync_model_from_ema(self, accelerator):
+        unwrapped_model = accelerator.unwrap_model(self.model)
+        unwrapped_model.load_state_dict(self.ema_model.state_dict(), strict=True)
+        logger.info("Synchronized train model from EMA model for stage transition")
 
     def _refresh_teacher_from_model(self, accelerator):
         unwrapped_model = accelerator.unwrap_model(self.model)
@@ -482,6 +492,8 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
 
                 if local_epoch_idx == self.stage1_epochs - 1 and self.stage2_epochs > 0:
                     self._save_named_checkpoint(accelerator, "stage1_final.ckpt")
+                    self._sync_model_from_ema(accelerator)
+                    self._reset_ema(ema)
                     train_dataloader, val_dataloader, lr_scheduler = self._rebuild_for_stage(
                         cfg,
                         accelerator,
@@ -493,6 +505,8 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                     )
                 elif local_epoch_idx == stage3_start - 1 and self.stage3_epochs > 0:
                     self._save_named_checkpoint(accelerator, "stage2_final.ckpt")
+                    self._sync_model_from_ema(accelerator)
+                    self._reset_ema(ema)
                     self._refresh_teacher_from_model(accelerator)
                     train_dataloader, val_dataloader, lr_scheduler = self._rebuild_for_stage(
                         cfg,
