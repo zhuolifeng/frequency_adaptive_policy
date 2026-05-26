@@ -100,6 +100,7 @@ policy:
   cd_teacher_rollout_steps: 2
   cd_weight: 1.0
   dsm_weight: 0.0
+  loss_10hz_weight: 1.0
 
 ema:
   _target_: ImplicitRDP.model.diffusion.ema_model.EMAModel
@@ -169,6 +170,11 @@ checkpoint:
     mode: min
     k: 1
     format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  topk_cd:
+    monitor_key: train_cd_loss
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-train_cd_loss={train_cd_loss:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 

@@ -80,7 +80,8 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
             f"prediction_type={cfg.policy.noise_scheduler.prediction_type}, "
             f"grid={list(cfg.policy.cd_timestep_grid)}, "
             f"cd_weight={cfg.policy.cd_weight}, "
-            f"dsm_weight={cfg.policy.dsm_weight}"
+            f"dsm_weight={cfg.policy.dsm_weight}, "
+            f"loss_10hz_weight={cfg.policy.loss_10hz_weight}"
         )
 
     def _apply_freeze_cfg(self, policy):
@@ -213,6 +214,10 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
             save_dir=os.path.join(self.output_dir, "checkpoints"),
             **cfg.checkpoint.topk,
         )
+        topk_cd_manager = TopKCheckpointManager(
+            save_dir=os.path.join(self.output_dir, "checkpoints"),
+            **cfg.checkpoint.topk_cd,
+        )
 
         train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = (
             accelerator.prepare(
@@ -251,6 +256,7 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
 
                 step_log = {}
                 train_losses = []
+                train_cd_losses = []
                 with tqdm.tqdm(
                     train_dataloader,
                     desc=f"CD training epoch {self.epoch}",
@@ -310,6 +316,8 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
 
                         raw_loss_cpu = raw_loss.item()
                         train_losses.append(raw_loss_cpu)
+                        if "cd_loss" in loss_dict:
+                            train_cd_losses.append(float(loss_dict["cd_loss"]))
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         step_log = {
                             "train_loss": raw_loss_cpu,
@@ -335,6 +343,9 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
 
                 step_log["train_loss"] = (
                     np.nanmean(train_losses) if len(train_losses) > 0 else 0.0
+                )
+                step_log["train_cd_loss"] = (
+                    float(np.nanmean(train_cd_losses)) if len(train_cd_losses) > 0 else 0.0
                 )
 
                 if (
@@ -374,6 +385,9 @@ class TrainDPMultiFreqCD50HzWorkspace(BaseWorkspace):
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
+                    topk_cd_ckpt_path = topk_cd_manager.get_ckpt_path(metric_dict)
+                    if topk_cd_ckpt_path is not None:
+                        self.save_checkpoint(path=topk_cd_ckpt_path)
                     self.model = model_ddp
 
                 accelerator.log(step_log, step=self.global_step)

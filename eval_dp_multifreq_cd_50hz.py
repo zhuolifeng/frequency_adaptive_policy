@@ -60,8 +60,22 @@ def main(cfg):
     policy.set_training_stage(2)
 
     configured_inference_steps = cfg.get("num_inference_steps", None)
-    if configured_inference_steps is not None:
-        policy.num_inference_steps = int(configured_inference_steps)
+    num_inference_steps_10hz = int(
+        cfg.get(
+            "num_inference_steps_10hz",
+            5 if configured_inference_steps is None else configured_inference_steps,
+        )
+    )
+    num_inference_steps_50hz = int(
+        cfg.get(
+            "num_inference_steps_50hz",
+            1 if configured_inference_steps is None else configured_inference_steps,
+        )
+    )
+    logger.info(
+        "Using inference steps: "
+        f"10Hz={num_inference_steps_10hz}, 50Hz={num_inference_steps_50hz}"
+    )
 
     device = torch.device(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     policy.eval().to(device)
@@ -124,7 +138,13 @@ def main(cfg):
             continue
 
         logger.info(f"Processing Episode {episode_idx} ({len(episode_data[episode_idx])} frames)")
+        if hasattr(policy, "reset"):
+            policy.reset()
+
+        mse_10hz_data = []
         mse_50hz_data = []
+        gt_chunk_10hz_data = []
+        pred_chunk_10hz_data = []
         gt_chunk_50hz_data = []
         pred_chunk_50hz_data = []
         force_data = episode_force_data_list[episode_idx]
@@ -142,7 +162,19 @@ def main(cfg):
                     obs_dict=obs_dict,
                     dataset_obs_temporal_downsample_ratio=dataset_obs_temporal_downsample_ratio,
                     extended_obs_dict=extended_obs_dict,
+                    num_inference_steps_10hz=num_inference_steps_10hz,
+                    num_inference_steps_50hz=num_inference_steps_50hz,
                 )
+
+                gt_10hz = batch["action"][:, 1:16]
+                pred_10hz = result["action_pred_10hz"][:, 1:16]
+                min_len_10 = min(gt_10hz.shape[1], pred_10hz.shape[1])
+                gt_10hz = gt_10hz[:, :min_len_10]
+                pred_10hz = pred_10hz[:, :min_len_10]
+                mse_10 = compute_mse(gt_10hz, pred_10hz)
+                mse_10hz_data.append(float(mse_10[0].mean().item()))
+                gt_chunk_10hz_data.append(gt_10hz[0].detach().cpu().numpy())
+                pred_chunk_10hz_data.append(pred_10hz[0].detach().cpu().numpy())
 
                 gt_50hz = batch["action_stack"][:, 13:]
                 pred_50hz = result["action_pred_50hz"][:, 13:]
@@ -154,70 +186,121 @@ def main(cfg):
                 gt_chunk_50hz_data.append(gt_50hz[0].detach().cpu().numpy())
                 pred_chunk_50hz_data.append(pred_50hz[0].detach().cpu().numpy())
 
-        all_metrics[str(episode_idx)] = {"mse_50hz": [float(x) for x in mse_50hz_data]}
+        all_metrics[str(episode_idx)] = {
+            "mse_10hz": [float(x) for x in mse_10hz_data],
+            "mse_50hz": [float(x) for x in mse_50hz_data],
+        }
 
-        video_writer = None
-        for frame_idx in tqdm.tqdm(
-            range(len(episode_data[episode_idx])),
-            desc=f"Episode {episode_idx} Video",
-        ):
+        n_frames = len(episode_data[episode_idx])
+        video_writers = {}
+        for frame_idx in tqdm.tqdm(range(n_frames), desc=f"Episode {episode_idx} Video"):
             sample = episode_data[episode_idx][frame_idx]
             obs_img = np.zeros((240, 320, 3), dtype=np.uint8)
             if "right_wrist_img" in sample["obs"]:
                 img_tensor = sample["obs"]["right_wrist_img"][0, -1]
                 obs_img = cv2.resize(denormalize_image(img_tensor), (640, 480))
 
-            panels = [
-                fig_to_image(
-                    create_simple_plot(
-                        mse_50hz_data[:frame_idx + 1],
-                        "50Hz Action MSE",
-                        "MSE",
-                        len(episode_data[episode_idx]),
-                    )
-                ),
-                fig_to_image(
-                    create_action_chunk_plot(
-                        gt_chunk_50hz_data[frame_idx],
-                        pred_chunk_50hz_data[frame_idx],
-                        f"50Hz Action Chunk GT vs Pred (Frame {frame_idx + 1})",
-                    )
-                ),
-            ]
+            overlay = obs_img.copy()
+            cv2.rectangle(overlay, (5, 5), (obs_img.shape[1] - 5, 50), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.6, obs_img, 0.4, 0, obs_img)
+            cv2.putText(
+                obs_img,
+                f"Frame: {frame_idx + 1}/{n_frames}",
+                (10, 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+            )
+
+            force_plot = None
             if has_force:
                 force_arr = np.array(force_data[:frame_idx + 1])
                 if force_arr.ndim == 3:
                     force_arr = force_arr.mean(axis=1)
-                panels.append(
-                    fig_to_image(
-                        create_force_plot(
-                            force_arr,
-                            metric="norm",
-                            title="Wrench (norm)",
-                            max_frames=len(episode_data[episode_idx]),
-                        )
+                force_plot = fig_to_image(
+                    create_force_plot(
+                        force_arr,
+                        metric="norm",
+                        title="Wrench (norm)",
+                        max_frames=n_frames,
                     )
                 )
-            panels.append(obs_img)
 
-            target_w = max(p.shape[1] for p in panels)
-            resized = []
-            for panel in panels:
-                if panel.shape[1] != target_w:
-                    new_h = int(panel.shape[0] * target_w / panel.shape[1])
-                    resized.append(cv2.resize(panel, (target_w, new_h)))
-                else:
-                    resized.append(panel)
-            combined = np.vstack(resized)
-            if video_writer is None:
-                h, w = combined.shape[:2]
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                vpath = output_dir / f"episode_{episode_idx:03d}_50hz.mp4"
-                video_writer = cv2.VideoWriter(str(vpath), fourcc, video_fps, (w, h))
-                logger.info(f"Creating video: {vpath}")
-            video_writer.write(combined)
-        if video_writer is not None:
-            video_writer.release()
+            videos = [
+                (
+                    "mse_10hz",
+                    fig_to_image(
+                        create_simple_plot(
+                            mse_10hz_data[:frame_idx + 1],
+                            "10Hz Action MSE",
+                            "MSE",
+                            n_frames,
+                        )
+                    ),
+                ),
+                (
+                    "mse_50hz",
+                    fig_to_image(
+                        create_simple_plot(
+                            mse_50hz_data[:frame_idx + 1],
+                            "50Hz Action MSE",
+                            "MSE",
+                            n_frames,
+                        )
+                    ),
+                ),
+                (
+                    "action_chunk_10hz",
+                    fig_to_image(
+                        create_action_chunk_plot(
+                            gt_chunk_10hz_data[frame_idx],
+                            pred_chunk_10hz_data[frame_idx],
+                            f"10Hz Action Chunk GT vs Pred (Frame {frame_idx + 1})",
+                        )
+                    ),
+                ),
+                (
+                    "action_chunk_50hz",
+                    fig_to_image(
+                        create_action_chunk_plot(
+                            gt_chunk_50hz_data[frame_idx],
+                            pred_chunk_50hz_data[frame_idx],
+                            f"50Hz Action Chunk GT vs Pred (Frame {frame_idx + 1})",
+                        )
+                    ),
+                ),
+            ]
+
+            for vname, plot_img in videos:
+                panels = [plot_img]
+                if force_plot is not None and vname.startswith("mse"):
+                    panels.append(force_plot)
+                panels.append(obs_img)
+
+                target_w = max(p.shape[1] for p in panels)
+                resized = []
+                for panel in panels:
+                    if panel.shape[1] != target_w:
+                        new_h = int(panel.shape[0] * target_w / panel.shape[1])
+                        resized.append(cv2.resize(panel, (target_w, new_h)))
+                    else:
+                        resized.append(panel)
+                combined = np.vstack(resized)
+
+                if vname not in video_writers:
+                    h, w = combined.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    vpath = output_dir / f"episode_{episode_idx:03d}_{vname}.mp4"
+                    video_writers[vname] = cv2.VideoWriter(
+                        str(vpath), fourcc, video_fps, (w, h)
+                    )
+                    logger.info(f"Creating video: {vpath}")
+                video_writers[vname].write(combined)
+
+        for writer in video_writers.values():
+            writer.release()
+        logger.info(f"Episode {episode_idx} completed")
 
     if all_metrics:
         metrics_path = output_dir / "all_episodes_metrics.json"

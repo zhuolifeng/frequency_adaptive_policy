@@ -2,8 +2,9 @@
 50Hz consistency distillation policy for the multi-frequency DP model.
 
 Stage 2 keeps the same diffusion transformer backbone as the supervised
-multi-frequency DP policy, but trains only the 50Hz branch with consistency
-distillation. The EMA model used as the CD target is managed by the workspace.
+multi-frequency DP policy. The 50Hz branch is trained with consistency
+distillation, while the 10Hz branch continues standard diffusion training.
+The EMA model used as the CD target is managed by the workspace.
 """
 from typing import Dict, List, Optional
 
@@ -21,6 +22,7 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         cd_teacher_rollout_steps: int = 2,
         cd_weight: float = 1.0,
         dsm_weight: float = 0.0,
+        loss_10hz_weight: float = 1.0,
         **kwargs,
     ):
         super().__init__(*args, training_stage=1, **kwargs)
@@ -39,6 +41,7 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         self.cd_teacher_rollout_steps = int(cd_teacher_rollout_steps)
         self.cd_weight = float(cd_weight)
         self.dsm_weight = float(dsm_weight)
+        self.loss_10hz_weight = float(loss_10hz_weight)
         self.training_stage = 2
 
     def set_training_stage(self, stage: int):
@@ -88,12 +91,14 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
             cur_t = next_t
         return x
 
-    def _prepare_50hz_inputs(self, batch: Dict[str, torch.Tensor]):
+    def _prepare_stage2_inputs(self, batch: Dict[str, torch.Tensor]):
         nobs = self.normalizer.normalize(batch["obs"])
+        nactions_10 = self.normalizer["action"].normalize(batch["action"])
         nactions_50 = self.normalizer["action_stack"].normalize(batch["action_stack"])
         batch_size = nactions_50.shape[0]
 
         assert "extended_obs" in batch, "extended_obs is required for RNN temporal condition"
+        temporal_cond_10hz = self.get_temporal_cond(batch["extended_obs"], head="10hz")
         temporal_cond_50hz = self.get_temporal_cond(batch["extended_obs"], head="50hz")
 
         from ImplicitRDP.common.pytorch_util import dict_apply
@@ -102,7 +107,7 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         obs_tokens = self.obs_encoder(this_nobs)
         if len(obs_tokens.shape) == 2:
             obs_tokens = obs_tokens.reshape(batch_size, -1, *obs_tokens.shape[1:])
-        return obs_tokens, nactions_50, temporal_cond_50hz
+        return obs_tokens, nactions_10, nactions_50, temporal_cond_10hz, temporal_cond_50hz
 
     def compute_cd_loss(
         self,
@@ -110,7 +115,13 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         teacher_policy: DPMultiFreqPolicy,
         target_policy: DPMultiFreqPolicy,
     ):
-        obs_tokens, x0_50hz, temporal_cond_50hz = self._prepare_50hz_inputs(batch)
+        (
+            obs_tokens,
+            x0_10hz,
+            x0_50hz,
+            temporal_cond_10hz,
+            temporal_cond_50hz,
+        ) = self._prepare_stage2_inputs(batch)
         batch_size = x0_50hz.shape[0]
         device = x0_50hz.device
 
@@ -146,12 +157,12 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         )
         student_x0_t, _ = self._prediction_to_x0_eps(x_t, student_out_t, t)
 
-        cd_loss = F.mse_loss(student_x0_t, target_x0_u.detach())
-        total_loss = self.cd_weight * cd_loss
+        cd_consistency_loss = F.mse_loss(student_x0_t, target_x0_u.detach())
+        train_cd_loss = self.cd_weight * cd_consistency_loss
 
         loss_dict = {
-            "cd_loss": cd_loss.item(),
-            "total_loss": total_loss.item(),
+            "cd_loss": train_cd_loss.item(),
+            "cd_consistency_loss": cd_consistency_loss.item(),
             "cd_t_mean": t.float().mean().item(),
             "cd_u_mean": u.float().mean().item(),
             "cd_teacher_rollout_steps": float(self.cd_teacher_rollout_steps),
@@ -160,9 +171,24 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
 
         if self.dsm_weight > 0:
             dsm_loss = F.mse_loss(student_x0_t, x0_50hz)
-            total_loss = total_loss + self.dsm_weight * dsm_loss
+            train_cd_loss = train_cd_loss + self.dsm_weight * dsm_loss
+            loss_dict["cd_loss"] = train_cd_loss.item()
             loss_dict["dsm_loss"] = dsm_loss.item()
-            loss_dict["total_loss"] = total_loss.item()
+            loss_dict["weighted_dsm_loss"] = (self.dsm_weight * dsm_loss).item()
+
+        loss_10hz = self._compute_dp_loss_one_freq(
+            self.model,
+            x0_10hz,
+            obs_tokens,
+            temporal_cond_10hz,
+            "10hz",
+        )
+        total_loss = train_cd_loss + self.loss_10hz_weight * loss_10hz
+        loss_dict["dp_loss_10hz"] = loss_10hz.item()
+        loss_dict["weighted_dp_loss_10hz"] = (
+            self.loss_10hz_weight * loss_10hz
+        ).item()
+        loss_dict["total_loss"] = total_loss.item()
 
         return total_loss, loss_dict
 
@@ -187,7 +213,7 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         **kwargs,
     ):
         steps = self.num_inference_steps if num_inference_steps is None else num_inference_steps
-        if steps != 1:
+        if freq_mode != "50hz" or steps != 1:
             return super()._ddim_sample(
                 model,
                 cond=cond,
@@ -239,25 +265,54 @@ class DPMultiFreqCD50HzPolicy(DPMultiFreqPolicy):
         dataset_obs_temporal_downsample_ratio: int = 1,
         extended_obs_dict: Optional[Dict[str, torch.Tensor]] = None,
         num_inference_steps: Optional[int] = None,
+        num_inference_steps_10hz: Optional[int] = None,
+        num_inference_steps_50hz: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
         assert "past_action" not in obs_dict
         assert extended_obs_dict is not None, "extended_obs is required for RNN temporal condition"
 
         obs_tokens = self._encode_obs(obs_dict)
+        temporal_cond_10hz = self.get_temporal_cond(extended_obs_dict, head="10hz")
         temporal_cond_50hz = self.get_temporal_cond(extended_obs_dict, head="50hz")
+        steps_10hz = (
+            num_inference_steps if num_inference_steps_10hz is None else num_inference_steps_10hz
+        )
+        steps_50hz = (
+            num_inference_steps if num_inference_steps_50hz is None else num_inference_steps_50hz
+        )
+
+        nsample_10hz = self.conditional_sample(
+            cond=obs_tokens,
+            temporal_cond=temporal_cond_10hz,
+            freq_mode="10hz",
+            num_inference_steps=steps_10hz,
+        )
         nsample_50hz = self.conditional_sample(
             cond=obs_tokens,
             temporal_cond=temporal_cond_50hz,
             freq_mode="50hz",
-            num_inference_steps=num_inference_steps,
+            num_inference_steps=steps_50hz,
         )
 
+        action_pred_10hz = self.normalizer["action"].unnormalize(nsample_10hz)
         action_pred_50hz = self.normalizer["action_stack"].unnormalize(nsample_50hz)
+        action_10hz = action_pred_10hz[
+            :, self.action_start_10hz:self.action_start_10hz + self.n_action_steps
+        ]
         action_50hz = action_pred_50hz[:, self.action_start_50hz:self.horizon_50hz]
 
+        if self.inference_head == "50hz":
+            action = action_50hz
+            action_pred = action_pred_50hz
+        else:
+            action = action_10hz
+            action_pred = action_pred_10hz
+
         return {
-            "action": action_50hz,
-            "action_pred": action_pred_50hz,
+            "action": action,
+            "action_pred": action_pred,
+            "action_10hz": action_10hz,
             "action_50hz": action_50hz,
+            "action_pred_10hz": action_pred_10hz,
             "action_pred_50hz": action_pred_50hz,
         }
