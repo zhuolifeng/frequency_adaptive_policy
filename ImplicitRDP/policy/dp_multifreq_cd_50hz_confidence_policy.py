@@ -923,15 +923,41 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         with autocast(enabled=self.use_amp_for_inference, dtype=self.amp_dtype):
             return self._predict_action(*args, **kwargs)
 
-    def _infer_head_from_packed_tokens(self, packed: torch.Tensor, requested_head: str):
-        if requested_head in ("10hz", "50hz"):
-            return requested_head
-        for head in ("10hz", "50hz"):
+    def _infer_head_from_packed_tokens(
+        self,
+        packed: torch.Tensor,
+        requested_head: Optional[str],
+    ):
+        def valid_for(head: str) -> bool:
             horizon = self.horizon_50hz if head == "50hz" else self.horizon_10hz
             obs_dim = packed.shape[1] - horizon * self.action_dim
-            if obs_dim > 0 and obs_dim % self.n_emb == 0:
-                return head
-        return self.inference_head
+            return obs_dim > 0 and obs_dim % self.n_emb == 0
+
+        if requested_head is not None and requested_head not in ("10hz", "50hz"):
+            raise ValueError(
+                f"Unsupported head={requested_head}. Expected '10hz', '50hz', or None."
+            )
+
+        if requested_head in ("10hz", "50hz"):
+            if not valid_for(requested_head):
+                raise ValueError(
+                    f"Packed trajectory shape {tuple(packed.shape)} is incompatible "
+                    f"with requested head={requested_head}."
+                )
+            return requested_head
+
+        valid_heads = [head for head in ("10hz", "50hz") if valid_for(head)]
+        if len(valid_heads) == 1:
+            return valid_heads[0]
+        if len(valid_heads) > 1:
+            raise ValueError(
+                f"Packed trajectory shape {tuple(packed.shape)} is compatible with "
+                f"multiple heads {valid_heads}; pass head explicitly."
+            )
+        raise ValueError(
+            f"Packed trajectory shape {tuple(packed.shape)} is incompatible with "
+            "both 10hz and 50hz heads."
+        )
 
     def _predict_from_obs_tokens_and_noisy_trajectory(
         self,
@@ -940,7 +966,7 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         extended_obs_last_step_list: List[int],
         dataset_obs_temporal_downsample_ratio: int,
         extend_obs_pad_after: bool = False,
-        head: str = "10hz",
+        head: Optional[str] = None,
     ) -> List[Dict[str, torch.Tensor]]:
         packed = torch.cat(obs_tokens_and_noisy_trajectory_list, dim=0)
         batch_size = packed.shape[0]

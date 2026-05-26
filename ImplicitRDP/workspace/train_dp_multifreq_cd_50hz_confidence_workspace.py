@@ -173,14 +173,10 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
             num_training_steps=max(1, num_steps),
             last_epoch=-1,
         )
-        train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = (
-            accelerator.prepare(
-                train_dataloader,
-                val_dataloader,
-                unwrapped_model,
-                self.optimizer,
-                lr_scheduler,
-            )
+        self.model, self.optimizer, lr_scheduler = accelerator.prepare(
+            unwrapped_model,
+            self.optimizer,
+            lr_scheduler,
         )
         if accelerator.state.num_processes > 1:
             self.model = torch.nn.parallel.DistributedDataParallel(
@@ -412,8 +408,7 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                                 self.optimizer.step()
                             self.optimizer.zero_grad(set_to_none=True)
                             lr_scheduler.step()
-                            if accelerator.is_main_process:
-                                ema.step(accelerator.unwrap_model(self.model))
+                            ema.step(accelerator.unwrap_model(self.model))
 
                         raw_loss_cpu = raw_loss.item()
                         train_losses.append(raw_loss_cpu)
