@@ -1,9 +1,9 @@
 """
-Three-stage workspace for DP multi-frequency confidence + 50Hz one-step DSM.
+Three-stage workspace for DP multi-frequency confidence + 50Hz CD.
 
 Stage 1: standard 10Hz + 50Hz DP training.
 Stage 2: freeze policy, train confidence head from 10Hz sample MSE.
-Stage 3: train DP backbone with 10Hz DP + 50Hz one-step DSM.
+Stage 3: train DP backbone with 10Hz DP + 50Hz CD.
 """
 
 if __name__ == "__main__":
@@ -25,7 +25,7 @@ import hydra
 import numpy as np
 import torch
 import tqdm
-from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate import Accelerator
 from omegaconf import OmegaConf
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
@@ -57,11 +57,14 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         random.seed(seed)
 
         self.model: DPMultiFreqCD50HzConfidencePolicy = hydra.utils.instantiate(cfg.policy)
+        self.teacher_model: DPMultiFreqCD50HzConfidencePolicy = copy.deepcopy(self.model)
         self.ema_model: DPMultiFreqCD50HzConfidencePolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
         else:
             raise ValueError("This workspace expects training.use_ema=True")
+        self.teacher_model.eval()
+        self.teacher_model.requires_grad_(False)
 
         self.stage1_epochs = int(cfg.training.get("stage1_epochs", 600))
         self.stage2_epochs = int(cfg.training.get("stage2_epochs", 250))
@@ -115,17 +118,15 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
 
     def _make_accelerator(self, cfg):
         log_backend = cfg.logging.get("backend", "tensorboard")
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         if log_backend == "tensorboard":
             return Accelerator(
                 log_with="tensorboard",
                 project_dir=os.path.join(self.output_dir, "tb_logs"),
-                kwargs_handlers=[ddp_kwargs],
             )
         if log_backend == "wandb":
-            return Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs])
+            return Accelerator(log_with="wandb")
         if log_backend in ("none", "disabled", None):
-            return Accelerator(kwargs_handlers=[ddp_kwargs])
+            return Accelerator()
         raise ValueError(f"Unsupported logging.backend={log_backend}")
 
     def _init_trackers(self, accelerator, cfg):
@@ -181,6 +182,12 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                 lr_scheduler,
             )
         )
+        if accelerator.state.num_processes > 1:
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                accelerator.unwrap_model(self.model),
+                device_ids=[self.model.device],
+                find_unused_parameters=True,
+            )
         logger.info(f"Rebuilt optimizer/scheduler for stage {stage}")
         return train_dataloader, val_dataloader, lr_scheduler
 
@@ -193,6 +200,15 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         self.save_checkpoint(path=path, use_thread=False)
         self.model = model_ddp
         logger.info(f"Saved checkpoint: {path}")
+
+    def _refresh_teacher_from_model(self, accelerator):
+        unwrapped_model = accelerator.unwrap_model(self.model)
+        self.teacher_model.load_state_dict(unwrapped_model.state_dict(), strict=True)
+        self.teacher_model.set_training_stage(3)
+        self.teacher_model.apply_stage_freeze()
+        self.teacher_model.eval()
+        self.teacher_model.requires_grad_(False)
+        logger.info("Refreshed frozen stage-3 teacher from current model")
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -246,6 +262,7 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
 
         normalizer = dataset.get_normalizer()
         self.model.set_normalizer(normalizer)
+        self.teacher_model.set_normalizer(normalizer)
         self.ema_model.set_normalizer(normalizer)
 
         num_steps_stage1 = (
@@ -275,8 +292,15 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                 lr_scheduler,
             )
         )
+        if accelerator.state.num_processes > 1:
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                accelerator.unwrap_model(self.model),
+                device_ids=[self.model.device],
+                find_unused_parameters=True,
+            )
 
         device = accelerator.device
+        self.teacher_model.to(device)
         self.ema_model.to(device)
 
         if cfg.training.debug:
@@ -305,7 +329,7 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                     stage_name = "Stage 2 Confidence"
                 else:
                     stage = 3
-                    stage_name = "Stage 3 50Hz one-step DSM"
+                    stage_name = "Stage 3 50Hz CD"
 
                 unwrapped_model: DPMultiFreqCD50HzConfidencePolicy = accelerator.unwrap_model(self.model)
                 unwrapped_model.set_training_stage(stage)
@@ -313,6 +337,8 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
 
                 self.model.train()
                 unwrapped_model.apply_stage_freeze()
+                if stage == 3:
+                    self.teacher_model.eval()
                 if self.ema_model is not None:
                     self.ema_model.set_training_stage(stage)
                     self.ema_model.apply_stage_freeze()
@@ -330,7 +356,14 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                     for batch_idx, batch in enumerate(tepoch):
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         with autocast(enabled=use_amp, dtype=amp_dtype):
-                            raw_loss, loss_dict = unwrapped_model.compute_loss(batch)
+                            if stage == 3:
+                                raw_loss, loss_dict = unwrapped_model.compute_loss(
+                                    batch,
+                                    target_policy=self.ema_model,
+                                    teacher_policy=self.teacher_model,
+                                )
+                            else:
+                                raw_loss, loss_dict = unwrapped_model.compute_loss(batch)
                             loss = raw_loss / cfg.training.gradient_accumulate_every
 
                         if not torch.isfinite(loss):
@@ -406,7 +439,7 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                     and len(val_dataloader) > 0
                     and accelerator.is_main_process
                 ):
-                    policy = self.ema_model
+                    policy = unwrapped_model if stage == 3 else self.ema_model
                     policy.set_training_stage(stage)
                     policy.eval()
                     with torch.no_grad():
@@ -414,7 +447,14 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                         for batch_idx, batch in enumerate(val_dataloader):
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                             with autocast(enabled=use_amp, dtype=amp_dtype):
-                                val_loss, _ = policy.compute_loss(batch)
+                                if stage == 3:
+                                    val_loss, _ = policy.compute_loss(
+                                        batch,
+                                        target_policy=self.ema_model,
+                                        teacher_policy=self.teacher_model,
+                                    )
+                                else:
+                                    val_loss, _ = policy.compute_loss(batch)
                             val_losses.append(val_loss.item())
                             if (
                                 cfg.training.max_val_steps is not None
@@ -453,6 +493,7 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                     )
                 elif local_epoch_idx == stage3_start - 1 and self.stage3_epochs > 0:
                     self._save_named_checkpoint(accelerator, "stage2_final.ckpt")
+                    self._refresh_teacher_from_model(accelerator)
                     train_dataloader, val_dataloader, lr_scheduler = self._rebuild_for_stage(
                         cfg,
                         accelerator,

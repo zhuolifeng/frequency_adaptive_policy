@@ -21,12 +21,8 @@ STAGE1_OBS_ENCODER_LR="${STAGE1_OBS_ENCODER_LR:-3.0e-5}"
 STAGE2_CONFIDENCE_LR="${STAGE2_CONFIDENCE_LR:-1.0e-4}"
 STAGE3_LR="${STAGE3_LR:-1.0e-5}"
 
-PREDICTION_TYPE="${PREDICTION_TYPE:-sample}"
-CD_TIMESTEP_GRID="${CD_TIMESTEP_GRID:-[99,79,59,39,19,0]}"
 CONFIDENCE_N_SAMPLES="${CONFIDENCE_N_SAMPLES:-8}"
-CONFIDENCE_NUM_INFERENCE_STEPS="${CONFIDENCE_NUM_INFERENCE_STEPS:-5}"
-CONFIDENCE_SELECTION="${CONFIDENCE_SELECTION:-False}"
-CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-3.5}"
+CONFIDENCE_NUM_INFERENCE_STEPS="${CONFIDENCE_NUM_INFERENCE_STEPS:-3}"
 
 USE_AMP_FOR_POLICY="${USE_AMP_FOR_POLICY:-False}"
 AMP_DTYPE_FOR_POLICY="${AMP_DTYPE_FOR_POLICY:-bf16}"
@@ -52,7 +48,6 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port ${MAIN_PROC
     task.dataset_path="${DATASET_PATH}" \
     task.name="${POLICY_TASK_NAME}" \
     exp_name="${EXP_NAME}" \
-    prediction_type="${PREDICTION_TYPE}" \
     training.seed="${SEED}" \
     training.stage1_epochs=${STAGE1_EPOCHS} \
     training.stage2_epochs=${STAGE2_EPOCHS} \
@@ -69,9 +64,6 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port ${MAIN_PROC
     optimizer.stage3_lr=${STAGE3_LR} \
     policy.use_amp_for_inference=${USE_AMP_FOR_POLICY} \
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
-    policy.cd_timestep_grid="${CD_TIMESTEP_GRID}" \
     policy.confidence_n_samples=${CONFIDENCE_N_SAMPLES} \
     policy.confidence_num_inference_steps=${CONFIDENCE_NUM_INFERENCE_STEPS} \
-    policy.use_confidence_based_head_selection=${CONFIDENCE_SELECTION} \
-    policy.confidence_threshold_for_head_selection=${CONFIDENCE_THRESHOLD} \
     "$@"

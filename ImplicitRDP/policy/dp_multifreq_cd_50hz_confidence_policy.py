@@ -1,10 +1,10 @@
 """
-Three-stage multi-frequency DP policy with confidence and 50Hz one-step DSM.
+Three-stage multi-frequency DP policy with confidence and 50Hz CD.
 
 Stage 1 trains the standard 10Hz + 50Hz DP objective.
 Stage 2 freezes the policy and trains a confidence head from 10Hz sample MSE.
 Stage 3 freezes observation/temporal/confidence modules and trains the DP
-backbone with 10Hz DP loss plus 50Hz one-step x0 DSM loss.
+backbone with 10Hz DP loss plus 50Hz consistency distillation.
 """
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -48,6 +48,8 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         action_start_50hz: int = 13,
         inference_head: str = "50hz",
         cd_timestep_grid: List[int] = (99, 79, 59, 39, 19, 0),
+        cd_teacher_rollout_steps: int = 1,
+        cd_weight: float = 1.0,
         dsm_weight: float = 1.0,
         loss_10hz_weight: float = 1.0,
         use_confidence_head: bool = True,
@@ -130,8 +132,19 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         assert self.inference_head in ("10hz", "50hz")
 
         self.cd_timestep_grid = [int(x) for x in cd_timestep_grid]
-        if len(self.cd_timestep_grid) < 1:
-            raise ValueError("cd_timestep_grid must contain at least one timestep.")
+        if len(self.cd_timestep_grid) < 2:
+            raise ValueError("cd_timestep_grid must contain at least two timesteps.")
+        if any(
+            self.cd_timestep_grid[i] <= self.cd_timestep_grid[i + 1]
+            for i in range(len(self.cd_timestep_grid) - 1)
+        ):
+            raise ValueError(
+                "cd_timestep_grid must be strictly descending, e.g. [99, 79, ..., 0]."
+            )
+        if cd_teacher_rollout_steps < 1:
+            raise ValueError("cd_teacher_rollout_steps must be >= 1.")
+        self.cd_teacher_rollout_steps = int(cd_teacher_rollout_steps)
+        self.cd_weight = float(cd_weight)
         self.dsm_weight = float(dsm_weight)
         self.loss_10hz_weight = float(loss_10hz_weight)
 
@@ -340,6 +353,39 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
             return self.noise_scheduler.get_velocity(trajectory, noise, timesteps)
         raise ValueError(f"Unsupported prediction_type={pred_type}")
 
+    def _ddim_jump_to(
+        self,
+        sample: torch.Tensor,
+        model_output: torch.Tensor,
+        timestep: torch.Tensor,
+        target_timestep: torch.Tensor,
+    ):
+        pred_x0, pred_eps = self._prediction_to_x0_eps(sample, model_output, timestep)
+        if self.noise_scheduler.config.clip_sample:
+            clip_range = getattr(self.noise_scheduler.config, "clip_sample_range", 1.0)
+            pred_x0 = pred_x0.clamp(-clip_range, clip_range)
+            _, beta_prod = self._get_variance_terms(timestep, sample)
+            alpha_prod = 1.0 - beta_prod
+            pred_eps = (
+                sample - alpha_prod.sqrt() * pred_x0
+            ) / beta_prod.sqrt().clamp_min(1e-12)
+
+        alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
+            device=sample.device, dtype=sample.dtype
+        )
+        target_timestep = target_timestep.clamp(
+            0, self.noise_scheduler.config.num_train_timesteps - 1
+        ).long()
+        alpha_target_flat = alphas_cumprod[target_timestep]
+        alpha_target_flat = torch.where(
+            target_timestep == 0,
+            torch.ones_like(alpha_target_flat),
+            alpha_target_flat,
+        )
+        alpha_target = alpha_target_flat.view(-1, 1, 1)
+        beta_target = 1.0 - alpha_target
+        return alpha_target.sqrt() * pred_x0 + beta_target.sqrt() * pred_eps
+
     def _sample_diffusion_batch(self, trajectory: torch.Tensor):
         batch_size = trajectory.shape[0]
         device = trajectory.device
@@ -451,6 +497,51 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
 
         return conf_loss, log_sigma, sigma, mse_masked
 
+    def _sample_cd_timestep_pair(
+        self, batch_size: int, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        grid = torch.tensor(self.cd_timestep_grid, dtype=torch.long, device=device)
+        pair_idx = torch.randint(
+            0,
+            len(self.cd_timestep_grid) - 1,
+            (batch_size,),
+            device=device,
+        )
+        return grid[pair_idx], grid[pair_idx + 1]
+
+    def _teacher_rollout_to_timestep(
+        self,
+        teacher_policy: "DPMultiFreqCD50HzConfidencePolicy",
+        sample: torch.Tensor,
+        start_timestep: torch.Tensor,
+        target_timestep: torch.Tensor,
+        obs_tokens: torch.Tensor,
+        temporal_cond: torch.Tensor,
+    ) -> torch.Tensor:
+        x = sample
+        cur_t = start_timestep
+        for step_idx in range(1, self.cd_teacher_rollout_steps + 1):
+            next_t = (
+                start_timestep.float()
+                + (target_timestep.float() - start_timestep.float())
+                * (step_idx / self.cd_teacher_rollout_steps)
+            ).round().long()
+            next_t = torch.maximum(next_t, target_timestep)
+            next_t = torch.minimum(next_t, cur_t - 1)
+            if step_idx == self.cd_teacher_rollout_steps:
+                next_t = target_timestep
+
+            teacher_out = teacher_policy.model(
+                x,
+                cur_t,
+                cond=obs_tokens,
+                temporal_cond=temporal_cond,
+                freq_mode="50hz",
+            )
+            x = teacher_policy._ddim_jump_to(x, teacher_out, cur_t, next_t)
+            cur_t = next_t
+        return x
+
     def _compute_10hz_sample_mse(
         self,
         nactions_10: torch.Tensor,
@@ -530,53 +621,115 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
                 loss_dict["confidence/conf_loss"] = conf_loss.item()
         return total, loss_dict
 
-    def compute_stage3_loss(self, batch, loss_mask=None):
+    def compute_stage3_loss(
+        self,
+        batch,
+        target_policy: Optional["DPMultiFreqCD50HzConfidencePolicy"] = None,
+        teacher_policy: Optional["DPMultiFreqCD50HzConfidencePolicy"] = None,
+        loss_mask=None,
+    ):
+        if target_policy is None:
+            target_policy = self
+        if teacher_policy is None:
+            teacher_policy = self
         obs_tokens, nactions_10, nactions_50, tc_10, tc_50 = self._prepare_multifreq_inputs(batch)
         loss_10 = self._compute_dp_loss_one_freq(
             nactions_10, obs_tokens, tc_10, "10hz", loss_mask
         )
 
         batch_size = nactions_50.shape[0]
-        t_value = int(self.cd_timestep_grid[0])
-        timesteps = torch.full(
-            (batch_size,),
-            t_value,
-            dtype=torch.long,
-            device=nactions_50.device,
-        )
+        device = nactions_50.device
+        t, u = self._sample_cd_timestep_pair(batch_size, device)
         noise = torch.randn_like(nactions_50)
-        x_t = self.noise_scheduler.add_noise(nactions_50, noise, timesteps)
-        model_output = self.model(
+        x_t = self.noise_scheduler.add_noise(nactions_50, noise, t)
+
+        with torch.no_grad():
+            x_u = self._teacher_rollout_to_timestep(
+                teacher_policy=teacher_policy,
+                sample=x_t,
+                start_timestep=t,
+                target_timestep=u,
+                obs_tokens=obs_tokens,
+                temporal_cond=tc_50,
+            )
+            target_out_u = target_policy.model(
+                x_u,
+                u,
+                cond=obs_tokens,
+                temporal_cond=tc_50,
+                freq_mode="50hz",
+            )
+            target_x0_u, _ = target_policy._prediction_to_x0_eps(
+                x_u, target_out_u, u
+            )
+
+        student_out_t = self.model(
             x_t,
-            timesteps,
+            t,
             cond=obs_tokens,
             temporal_cond=tc_50,
             freq_mode="50hz",
         )
-        pred_x0, _ = self._prediction_to_x0_eps(x_t, model_output, timesteps)
-        dsm_loss = F.mse_loss(pred_x0, nactions_50)
-        total = self.loss_10hz_weight * loss_10 + self.dsm_weight * dsm_loss
-        return total, {
+        student_x0_t, _ = self._prediction_to_x0_eps(x_t, student_out_t, t)
+
+        cd_consistency_loss = F.mse_loss(student_x0_t, target_x0_u.detach())
+        train_cd_loss = self.cd_weight * cd_consistency_loss
+        loss_dict = {
+            "cd_loss": train_cd_loss.item(),
+            "cd_consistency_loss": cd_consistency_loss.item(),
+            "cd_t_mean": t.float().mean().item(),
+            "cd_u_mean": u.float().mean().item(),
+            "cd_teacher_rollout_steps": float(self.cd_teacher_rollout_steps),
             "dp_loss_10hz": loss_10.item(),
-            "dsm_loss_50hz": dsm_loss.item(),
             "weighted_dp_loss_10hz": (self.loss_10hz_weight * loss_10).item(),
-            "weighted_dsm_loss_50hz": (self.dsm_weight * dsm_loss).item(),
-            "cd_timestep": float(t_value),
-            "total_loss": total.item(),
             "training_stage": 3.0,
         }
+        if self.dsm_weight > 0:
+            dsm_loss = F.mse_loss(student_x0_t, nactions_50)
+            train_cd_loss = train_cd_loss + self.dsm_weight * dsm_loss
+            loss_dict["cd_loss"] = train_cd_loss.item()
+            loss_dict["dsm_loss_50hz"] = dsm_loss.item()
+            loss_dict["weighted_dsm_loss_50hz"] = (
+                self.dsm_weight * dsm_loss
+            ).item()
 
-    def compute_loss(self, batch, loss_mask=None):
+        total = train_cd_loss + self.loss_10hz_weight * loss_10
+        loss_dict["total_loss"] = total.item()
+        return total, loss_dict
+
+    def compute_loss(
+        self,
+        batch,
+        target_policy: Optional["DPMultiFreqCD50HzConfidencePolicy"] = None,
+        teacher_policy: Optional["DPMultiFreqCD50HzConfidencePolicy"] = None,
+        loss_mask=None,
+    ):
         if self.training_stage == 1:
             return self.compute_stage1_loss(batch, loss_mask)
         if self.training_stage == 2:
             return self.compute_confidence_loss(batch, loss_mask)
         if self.training_stage == 3:
-            return self.compute_stage3_loss(batch, loss_mask)
+            return self.compute_stage3_loss(
+                batch,
+                target_policy=target_policy,
+                teacher_policy=teacher_policy,
+                loss_mask=loss_mask,
+            )
         raise ValueError(f"Invalid training_stage={self.training_stage}")
 
-    def forward(self, batch, loss_mask=None):
-        return self.compute_loss(batch, loss_mask)
+    def forward(
+        self,
+        batch,
+        target_policy: Optional["DPMultiFreqCD50HzConfidencePolicy"] = None,
+        teacher_policy: Optional["DPMultiFreqCD50HzConfidencePolicy"] = None,
+        loss_mask=None,
+    ):
+        return self.compute_loss(
+            batch,
+            target_policy=target_policy,
+            teacher_policy=teacher_policy,
+            loss_mask=loss_mask,
+        )
 
     def _ddim_sample(
         self,
