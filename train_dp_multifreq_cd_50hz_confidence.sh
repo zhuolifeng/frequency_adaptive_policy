@@ -10,7 +10,12 @@ TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 SEED="${SEED:-42}"
 
 EXP_NAME="${EXP_NAME:-dp_multifreq_cd_50hz_confidence}"
-POLICY_TASK_NAME="${TASK}_${DATASET_VERSION}_dp_multifreq_cd_50hz_confidence"
+POLICY_TASK_NAME="${TASK}_${DATASET_VERSION}_dp_multifreq_cd_50hz_confidence}"
+
+# Stage 2 calibration dataset (optional, defaults to same as stage 1)
+STAGE2_DATASET_VERSION="${STAGE2_DATASET_VERSION:-}"
+STAGE2_ROUND="${STAGE2_ROUND:-1}"
+STAGE2_DATASET_PATH="${STAGE2_DATASET_PATH:-}"
 
 STAGE1_EPOCHS="${STAGE1_EPOCHS:-600}"
 STAGE2_EPOCHS="${STAGE2_EPOCHS:-250}"
@@ -33,13 +38,23 @@ MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29504}"
 
 NUM_EPOCHS=$((STAGE1_EPOCHS + STAGE2_EPOCHS + STAGE3_EPOCHS))
 
+# Build stage 2 dataset path if STAGE2_DATASET_VERSION is set
+STAGE2_DATASET_ARG=""
+if [ -n "${STAGE2_DATASET_PATH}" ]; then
+    STAGE2_DATASET_ARG="training.stage2_dataset_path=${STAGE2_DATASET_PATH}"
+elif [ -n "${STAGE2_DATASET_VERSION}" ]; then
+    STAGE2_DATASET_PATH="/mnt/workspace/users/lifeng/${TASK}_${STAGE2_DATASET_VERSION}_round_${STAGE2_ROUND}_zarr"
+    STAGE2_DATASET_ARG="training.stage2_dataset_path=${STAGE2_DATASET_PATH}"
+fi
+
 echo "=========================================="
 echo "DP MultiFreq 50Hz CD Confidence Training"
 echo "=========================================="
-echo "  Dataset:      ${DATASET_PATH}"
-echo "  Stage epochs: ${STAGE1_EPOCHS}/${STAGE2_EPOCHS}/${STAGE3_EPOCHS}"
-echo "  LR:           ${STAGE1_LR}/${STAGE2_CONFIDENCE_LR}/${STAGE3_LR}"
-echo "  Confidence:   samples=${CONFIDENCE_N_SAMPLES}, steps=${CONFIDENCE_NUM_INFERENCE_STEPS}"
+echo "  Dataset (Stage 1):  ${DATASET_PATH}"
+echo "  Dataset (Stage 2):  ${STAGE2_DATASET_PATH:-same as Stage 1}"
+echo "  Stage epochs:       ${STAGE1_EPOCHS}/${STAGE2_EPOCHS}/${STAGE3_EPOCHS}"
+echo "  LR:                 ${STAGE1_LR}/${STAGE2_CONFIDENCE_LR}/${STAGE3_LR}"
+echo "  Confidence:         samples=${CONFIDENCE_N_SAMPLES}, steps=${CONFIDENCE_NUM_INFERENCE_STEPS}"
 echo "=========================================="
 
 CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port ${MAIN_PROCESS_PORT} train.py \
@@ -66,4 +81,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port ${MAIN_PROC
     policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
     policy.confidence_n_samples=${CONFIDENCE_N_SAMPLES} \
     policy.confidence_num_inference_steps=${CONFIDENCE_NUM_INFERENCE_STEPS} \
+    ${STAGE2_DATASET_ARG} \
     "$@"
+
+exit 0

@@ -69,9 +69,17 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         self.stage1_epochs = int(cfg.training.get("stage1_epochs", 600))
         self.stage2_epochs = int(cfg.training.get("stage2_epochs", 250))
         self.stage3_epochs = int(cfg.training.get("stage3_epochs", 100))
+        self.stage2_dataset_path = cfg.training.get("stage2_dataset_path", None)
         self.current_stage = 1
         self.model.set_training_stage(1)
         self.model.apply_stage_freeze()
+
+        # Prepare two dataset configs for stage 1 and stage 2
+        self._dataset_stage1_cfg = cfg.task.dataset
+        self._dataset_stage2_cfg = OmegaConf.create(OmegaConf.to_container(cfg.task.dataset, resolve=True))
+        stage2_dataset_path = self.stage2_dataset_path if self.stage2_dataset_path is not None else cfg.task.dataset_path
+        self._dataset_stage2_cfg["dataset_path"] = stage2_dataset_path
+        self._dataset_stage2: BaseImageDataset = None  # built in run()
 
         optimizer_cfg = self._optimizer_cfg_for_stage(cfg, stage=1)
         self.optimizer = self.model.get_optimizer(**optimizer_cfg)
@@ -87,6 +95,8 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         logger.info(f"  Stage 1: {self.stage1_epochs} epochs, lr={cfg.optimizer.stage1_lr}")
         logger.info(f"  Stage 2: {self.stage2_epochs} epochs, lr={cfg.optimizer.stage2_confidence_lr}")
         logger.info(f"  Stage 3: {self.stage3_epochs} epochs, lr={cfg.optimizer.stage3_lr}")
+        logger.info(f"  Stage 1 dataset: {cfg.task.dataset_path}")
+        logger.info(f"  Stage 2 dataset: {self._dataset_stage2_cfg['dataset_path']}")
 
     def _optimizer_cfg_for_stage(self, cfg, stage: int):
         opt = OmegaConf.to_container(cfg.optimizer, resolve=True)
@@ -253,6 +263,10 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         dataset: BaseImageDataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
         val_dataset = dataset.get_validation_dataset()
+
+        # Pre-build Stage 2 dataset for calibration
+        dataset_stage2: BaseImageDataset = hydra.utils.instantiate(self._dataset_stage2_cfg)
+        assert isinstance(dataset_stage2, BaseImageDataset)
 
         dataloader_cfg = OmegaConf.to_container(cfg.dataloader, resolve=True)
         val_dataloader_cfg = OmegaConf.to_container(cfg.val_dataloader, resolve=True)
@@ -489,11 +503,35 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                     self._save_named_checkpoint(accelerator, "stage1_final.ckpt")
                     self._sync_model_from_ema(accelerator)
                     self._reset_ema(ema)
+
+                    # Switch to Stage 2 calibration dataset if different from Stage 1
+                    if self._dataset_stage2_cfg["dataset_path"] != self._dataset_stage1_cfg["dataset_path"]:
+                        logger.info(f"Switching to Stage 2 calibration dataset: {self._dataset_stage2_cfg['dataset_path']}")
+
+                        # Re-instantiate stage 2 dataset in case it needs fresh state
+                        dataset_stage2_new: BaseImageDataset = hydra.utils.instantiate(self._dataset_stage2_cfg)
+                        new_train_dataset = dataset_stage2_new
+                        new_val_dataset = dataset_stage2_new.get_validation_dataset()
+                        new_train_dataloader = DataLoader(new_train_dataset, **dataloader_cfg)
+                        new_val_dataloader = DataLoader(new_val_dataset, **val_dataloader_cfg)
+
+                        # Compute and switch normalizer for stage 2 calibration dataset
+                        dataset_stage2_normalizer = dataset_stage2_new.get_normalizer()
+                        unwrapped_model = accelerator.unwrap_model(self.model)
+                        unwrapped_model.set_normalizer(dataset_stage2_normalizer)
+                        self.teacher_model.set_normalizer(dataset_stage2_normalizer)
+                        self.ema_model.set_normalizer(dataset_stage2_normalizer)
+                        logger.info("Normalizer switched to Stage 2 calibration dataset normalizer")
+                    else:
+                        logger.info("Stage 2 uses same dataset as Stage 1, rebuilding DataLoader")
+                        new_train_dataloader = DataLoader(dataset, **dataloader_cfg)
+                        new_val_dataloader = DataLoader(val_dataset, **val_dataloader_cfg)
+
                     train_dataloader, val_dataloader, lr_scheduler = self._rebuild_for_stage(
                         cfg,
                         accelerator,
-                        train_dataloader,
-                        val_dataloader,
+                        new_train_dataloader,
+                        new_val_dataloader,
                         stage=2,
                         stage_epochs=self.stage2_epochs,
                         scheduler_steps_per_epoch=scheduler_steps_per_epoch,

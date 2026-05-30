@@ -167,6 +167,10 @@ training:
   stage1_epochs: 600
   stage2_epochs: 250
   stage3_epochs: 100
+  # Stage 2 dataset path. If null, uses same dataset as stage 1.
+  # Set to a different path to use a calibration dataset for stage 2 confidence training.
+  # Example: /path/to/calibration_data_zarr
+  stage2_dataset_path: null
   num_epochs: 950
   gradient_accumulate_every: 1
   max_grad_norm: 1.0
