@@ -73,6 +73,7 @@ class ACTConfidenceStagewisePolicy(BaseImagePolicy):
         self.progress = 0.0
 
         all_extented_obs_keys = list(shape_meta['extended_obs'].keys()) if 'extended_obs' in shape_meta else []
+        all_extented_obs_keys.remove('right_robot_tcp_wrench_stack')
         self.extented_obs_keys = sorted(all_extented_obs_keys)
         temporal_cond_dim = sum([shape_meta['extended_obs'][extented_obs_key]['shape'][-1]
                                  for extented_obs_key in self.extented_obs_keys])
@@ -612,12 +613,18 @@ class ACTConfidenceStagewisePolicy(BaseImagePolicy):
                       weight_decay: float,
                       obs_encoder_lr: Optional[float] = None,
                       obs_encoder_weight_decay: Optional[float] = None,
+                      confidence_lr: Optional[float] = None,
+                      confidence_weight_decay: Optional[float] = None,
                       betas: Tuple[float, float] = (0.9, 0.95),
                       **kwargs) -> torch.optim.Optimizer:
         if obs_encoder_lr is None:
             obs_encoder_lr = lr
         if obs_encoder_weight_decay is None:
             obs_encoder_weight_decay = weight_decay
+        if confidence_lr is None:
+            confidence_lr = lr
+        if confidence_weight_decay is None:
+            confidence_weight_decay = weight_decay
 
         optim_groups = []
 
@@ -625,12 +632,28 @@ class ACTConfidenceStagewisePolicy(BaseImagePolicy):
             optim_groups += self.rnn_obs_encoder.get_optim_groups(weight_decay=weight_decay)
 
         if self.confidence_head is not None and self.training_stage == 2:
+            # Get confidence head params
             if hasattr(self.confidence_head, 'get_optim_groups'):
-                optim_groups += self.confidence_head.get_optim_groups(weight_decay=weight_decay)
+                # Some modules have get_optim_groups that doesn't accept lr/weight_decay
+                try:
+                    conf_groups = self.confidence_head.get_optim_groups(
+                        weight_decay=confidence_weight_decay,
+                        lr=confidence_lr
+                    )
+                    optim_groups += conf_groups
+                except TypeError:
+                    # Fallback: get params without lr, add lr in optimizer creation
+                    conf_groups = self.confidence_head.get_optim_groups(
+                        weight_decay=confidence_weight_decay
+                    )
+                    for g in conf_groups:
+                        g['lr'] = confidence_lr
+                    optim_groups += conf_groups
             else:
                 optim_groups += [{
                     "params": self.confidence_head.parameters(),
-                    "weight_decay": weight_decay,
+                    "weight_decay": confidence_weight_decay,
+                    "lr": confidence_lr
                 }]
 
         if self.obs_encoder is not None and self.training_stage == 1:

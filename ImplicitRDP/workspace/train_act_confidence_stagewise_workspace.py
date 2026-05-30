@@ -71,7 +71,21 @@ class TrainACTConfidenceStagewiseWorkspace(BaseWorkspace):
         # Stagewise training config
         self.stage1_epochs = cfg.training.get('stage1_epochs', 600)
         self.stage2_epochs = cfg.training.get('stage2_epochs', 300)
+        self.stage2_dataset_path = cfg.training.get('stage2_dataset_path', None)
+        self.confidence_lr = cfg.training.get('confidence_lr', None)
+        self.confidence_weight_decay = cfg.training.get('confidence_weight_decay', None)
         self.current_stage = 1
+
+        # Prepare two dataset configs for stage 1 and stage 2
+        self._dataset_stage1_cfg = cfg.task.dataset
+        self._dataset_stage2_cfg = OmegaConf.create(OmegaConf.to_container(cfg.task.dataset, resolve=True))
+        stage2_dataset_path = self.stage2_dataset_path if self.stage2_dataset_path is not None else cfg.task.dataset_path
+        self._dataset_stage2_cfg['dataset_path'] = stage2_dataset_path
+
+        logger.info(f"Two-stage dataset configuration:")
+        logger.info(f"  Stage 1 dataset: {cfg.task.dataset_path}")
+        logger.info(f"  Stage 2 dataset: {stage2_dataset_path}")
+        self._dataset_stage2 = None  # Kept for reference; actual dataset is built in run()
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -131,6 +145,10 @@ class TrainACTConfidenceStagewiseWorkspace(BaseWorkspace):
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
 
+        # Pre-build Stage 2 dataset
+        dataset_stage2: BaseImageDataset = hydra.utils.instantiate(self._dataset_stage2_cfg)
+        assert isinstance(dataset_stage2, BaseImageDataset)
+
         dataloader_cfg = OmegaConf.to_container(cfg.dataloader, resolve=True)
         val_dataloader_cfg = OmegaConf.to_container(cfg.val_dataloader, resolve=True)
         print("###########################################")
@@ -148,31 +166,27 @@ class TrainACTConfidenceStagewiseWorkspace(BaseWorkspace):
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **val_dataloader_cfg)
 
+        # Compute normalizer BEFORE accelerator.prepare() — no cross-process file I/O needed
+        normalizer = dataset.get_normalizer()
+        if cfg.training.pretrained_ckpt_path is not None:
+            normalizer_state_dict = normalizer.state_dict()
+            current_normalizer_state_dict = self.model.normalizer.state_dict()
+            for key in current_normalizer_state_dict.keys():
+                normalizer_state_dict[key] = current_normalizer_state_dict[key]
+            normalizer.load_state_dict(normalizer_state_dict)
+        self.model.set_normalizer(normalizer)
+        if cfg.training.use_ema:
+            self.ema_model.set_normalizer(normalizer)
+
+        # Save dataset resume params on main process
         dataset_resume_params_path = os.path.join(self.output_dir, 'dataset_resume_params.pkl')
         if accelerator.is_main_process:
             dataset_resume_params = dataset.get_resume_params()
             with open(dataset_resume_params_path, 'wb') as f:
                 pickle.dump(dataset_resume_params, f)
 
-        # compute normalizer on the main process and save to disk
-        normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
-        if accelerator.is_main_process:
-            normalizer = dataset.get_normalizer()
-            if cfg.training.pretrained_ckpt_path is not None:
-                normalizer_state_dict = normalizer.state_dict()
-                current_normalizer_state_dict = self.model.normalizer.state_dict()
-                for key in current_normalizer_state_dict.keys():
-                    normalizer_state_dict[key] = current_normalizer_state_dict[key]
-                normalizer.load_state_dict(normalizer_state_dict)
-            pickle.dump(normalizer, open(normalizer_path, 'wb'))
-
-        # load normalizer on all processes
-        accelerator.wait_for_everyone()
-        normalizer = pickle.load(open(normalizer_path, 'rb'))
-
-        self.model.set_normalizer(normalizer)
-        if cfg.training.use_ema:
-            self.ema_model.set_normalizer(normalizer)
+        # Stagewise num_epochs override (resolve before lr_scheduler needs it)
+        cfg.training.num_epochs = self.stage1_epochs + self.stage2_epochs
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
@@ -209,7 +223,7 @@ class TrainACTConfidenceStagewiseWorkspace(BaseWorkspace):
                 find_unused_parameters=True
             )
         
-        device = self.model.device
+        device = accelerator.device
         if self.ema_model is not None:
             self.ema_model.to(device)
 
@@ -246,6 +260,7 @@ class TrainACTConfidenceStagewiseWorkspace(BaseWorkspace):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
+                device = accelerator.device
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch} ({stage_name})", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
@@ -321,6 +336,7 @@ class TrainACTConfidenceStagewiseWorkspace(BaseWorkspace):
                 if (self.epoch % val_interval == 0) and len(val_dataloader) > 0 and accelerator.is_main_process:
                     with torch.no_grad():
                         val_losses = list()
+                        device = accelerator.device
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch in tepoch:
@@ -380,17 +396,63 @@ class TrainACTConfidenceStagewiseWorkspace(BaseWorkspace):
                         self.save_checkpoint(path=stage1_ckpt_path)
                         logger.info(f"Saved Stage 1 checkpoint to {stage1_ckpt_path}")
                     
+                    # Switch to Stage 2 dataset if different from Stage 1
+                    if self._dataset_stage2_cfg['dataset_path'] != self._dataset_stage1_cfg['dataset_path']:
+                        logger.info(f"Switching to Stage 2 dataset: {self._dataset_stage2_cfg['dataset_path']}")
+                        
+                        # dataset_stage2 was pre-built at the start of run() — reuse it
+                        new_train_dataset = dataset_stage2
+                        new_val_dataset = dataset_stage2.get_validation_dataset()
+                        new_train_dataloader = DataLoader(new_train_dataset, **dataloader_cfg)
+                        new_val_dataloader = DataLoader(new_val_dataset, **val_dataloader_cfg)
+                        
+                        # Compute and switch normalizer for stage 2 dataset (no cross-process file I/O)
+                        dataset_stage2_normalizer = dataset_stage2.get_normalizer()
+                        unwrapped_model = accelerator.unwrap_model(self.model)
+                        unwrapped_model.set_normalizer(dataset_stage2_normalizer)
+                        if cfg.training.use_ema:
+                            self.ema_model.set_normalizer(dataset_stage2_normalizer)
+                            self.ema_model.to(accelerator.device)
+                        logger.info("Normalizer switched to Stage 2 dataset normalizer")
+                    else:
+                        # Same dataset, just rebuild dataloader to reset epoch
+                        logger.info("Stage 2 uses same dataset as Stage 1, rebuilding DataLoader")
+                        new_train_dataloader = DataLoader(dataset, **dataloader_cfg)
+                        new_val_dataloader = DataLoader(dataset.get_validation_dataset(), **val_dataloader_cfg)
+                    
                     # Rebuild optimizer for stage 2 (different parameters to optimize)
                     logger.info("Rebuilding optimizer for Stage 2...")
                     optimizer_cfg = OmegaConf.to_container(cfg.optimizer, resolve=True)
                     unwrapped_model = accelerator.unwrap_model(self.model)
                     if hasattr(unwrapped_model, 'set_training_stage'):
                         unwrapped_model.set_training_stage(2)
+                    
+                    # Add confidence_lr and confidence_weight_decay to optimizer config if specified
+                    if self.confidence_lr is not None:
+                        optimizer_cfg['confidence_lr'] = self.confidence_lr
+                    if self.confidence_weight_decay is not None:
+                        optimizer_cfg['confidence_weight_decay'] = self.confidence_weight_decay
+                    
                     self.optimizer = unwrapped_model.get_optimizer(**optimizer_cfg)
                     
-                    # Re-prepare with new optimizer
+                    # Reset GradScaler for Stage 2 to avoid stale state
+                    if self.scaler is not None:
+                        self.scaler = GradScaler()
+                    
+                    # Rebuild lr_scheduler for Stage 2 with correct total steps
+                    num_steps_stage2 = (len(new_train_dataloader) * self.stage2_epochs) \
+                        // cfg.training.gradient_accumulate_every
+                    lr_scheduler_stage2 = get_scheduler(
+                        cfg.training.lr_scheduler,
+                        optimizer=self.optimizer,
+                        num_warmup_steps=cfg.training.lr_warmup_steps,
+                        num_training_steps=num_steps_stage2,
+                        last_epoch=-1
+                    )
+                    
+                    # Re-prepare with new DataLoader, optimizer, and lr_scheduler
                     train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
-                        train_dataloader, val_dataloader, unwrapped_model, self.optimizer, lr_scheduler
+                        new_train_dataloader, new_val_dataloader, unwrapped_model, self.optimizer, lr_scheduler_stage2
                     )
                     
                     if accelerator.state.num_processes > 1:
@@ -400,7 +462,7 @@ class TrainACTConfidenceStagewiseWorkspace(BaseWorkspace):
                             find_unused_parameters=True
                         )
                     
-                    logger.info("Optimizer rebuilt for Stage 2!")
+                    logger.info("Dataset, normalizer, optimizer rebuilt for Stage 2!")
                 
                 # ========= eval end for this epoch ==========
                 # end of epoch
