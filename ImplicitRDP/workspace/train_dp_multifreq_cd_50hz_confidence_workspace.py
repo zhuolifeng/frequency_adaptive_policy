@@ -21,6 +21,7 @@ import pathlib
 import random
 
 import dill
+import pickle
 import hydra
 import numpy as np
 import torch
@@ -41,6 +42,7 @@ from ImplicitRDP.policy.dp_multifreq_cd_50hz_confidence_policy import (
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 
 from loguru import logger
+
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -74,11 +76,16 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         self.model.set_training_stage(1)
         self.model.apply_stage_freeze()
 
-        # Prepare two dataset configs for stage 1 and stage 2
+        # Prepare dataset configs for all stages
+        # Stage 1 dataset config (and also used by Stage 3)
         self._dataset_stage1_cfg = cfg.task.dataset
+        # Stage 2 dataset config (different path for confidence calibration)
         self._dataset_stage2_cfg = OmegaConf.create(OmegaConf.to_container(cfg.task.dataset, resolve=True))
         stage2_dataset_path = self.stage2_dataset_path if self.stage2_dataset_path is not None else cfg.task.dataset_path
         self._dataset_stage2_cfg["dataset_path"] = stage2_dataset_path
+        # Stage 1 dataset instance (used by Stage 1 and Stage 3)
+        self._dataset_stage1: BaseImageDataset = None  # built in run()
+        # Stage 2 dataset instance (used by Stage 2 only)
         self._dataset_stage2: BaseImageDataset = None  # built in run()
 
         optimizer_cfg = self._optimizer_cfg_for_stage(cfg, stage=1)
@@ -161,7 +168,6 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         val_dataloader,
         stage: int,
         stage_epochs: int,
-        scheduler_steps_per_epoch: int,
     ):
         unwrapped_model = accelerator.unwrap_model(self.model)
         unwrapped_model.set_training_stage(stage)
@@ -173,6 +179,7 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         if self.scaler is not None:
             self.scaler = GradScaler()
 
+        scheduler_steps_per_epoch = len(train_dataloader)
         num_steps = (
             scheduler_steps_per_epoch * max(1, stage_epochs)
         ) // cfg.training.gradient_accumulate_every
@@ -183,7 +190,9 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
             num_training_steps=max(1, num_steps),
             last_epoch=-1,
         )
-        self.model, self.optimizer, lr_scheduler = accelerator.prepare(
+        train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
+            train_dataloader,
+            val_dataloader,
             unwrapped_model,
             self.optimizer,
             lr_scheduler,
@@ -194,7 +203,7 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                 device_ids=[self.model.device],
                 find_unused_parameters=True,
             )
-        logger.info(f"Rebuilt optimizer/scheduler for stage {stage}")
+        logger.info(f"Rebuilt dataloaders, optimizer, and scheduler for stage {stage}")
         return train_dataloader, val_dataloader, lr_scheduler
 
     def _save_named_checkpoint(self, accelerator, name: str):
@@ -260,13 +269,15 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
             )
             logger.info(f"Loaded pretrained checkpoint: {ckpt_path}")
 
-        dataset: BaseImageDataset = hydra.utils.instantiate(cfg.task.dataset)
+        # Instantiate both datasets upfront (they live for the entire training run)
+        dataset: BaseImageDataset = hydra.utils.instantiate(self._dataset_stage1_cfg)
         assert isinstance(dataset, BaseImageDataset)
         val_dataset = dataset.get_validation_dataset()
+        self._dataset_stage1 = dataset
 
-        # Pre-build Stage 2 dataset for calibration
         dataset_stage2: BaseImageDataset = hydra.utils.instantiate(self._dataset_stage2_cfg)
         assert isinstance(dataset_stage2, BaseImageDataset)
+        self._dataset_stage2 = dataset_stage2
 
         dataloader_cfg = OmegaConf.to_container(cfg.dataloader, resolve=True)
         val_dataloader_cfg = OmegaConf.to_container(cfg.val_dataloader, resolve=True)
@@ -274,12 +285,6 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
         val_dataloader_cfg["batch_size"] = val_dataloader_cfg["batch_size"] // cuda_count
         train_dataloader = DataLoader(dataset, **dataloader_cfg)
         val_dataloader = DataLoader(val_dataset, **val_dataloader_cfg)
-        # Keep the original, unprepared dataloader length for scheduler step
-        # counts. Reusing a prepared dataloader at stage transitions can make
-        # the cosine scheduler too short, causing LR to oscillate after it
-        # passes num_training_steps.
-        scheduler_steps_per_epoch = len(train_dataloader)
-
         normalizer = dataset.get_normalizer()
         self.model.set_normalizer(normalizer)
         self.teacher_model.set_normalizer(normalizer)
@@ -499,57 +504,92 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                 json_logger.log(step_log)
                 self.global_step += 1
 
+                # ========= Stage transition: Stage 1 -> Stage 2 ==========
                 if local_epoch_idx == self.stage1_epochs - 1 and self.stage2_epochs > 0:
                     self._save_named_checkpoint(accelerator, "stage1_final.ckpt")
                     self._sync_model_from_ema(accelerator)
                     self._reset_ema(ema)
 
-                    # Switch to Stage 2 calibration dataset if different from Stage 1
-                    if self._dataset_stage2_cfg["dataset_path"] != self._dataset_stage1_cfg["dataset_path"]:
-                        logger.info(f"Switching to Stage 2 calibration dataset: {self._dataset_stage2_cfg['dataset_path']}")
+                    # Switch to Stage 2 calibration dataset
+                    logger.info(f"Switching to Stage 2 dataset: {self._dataset_stage2_cfg['dataset_path']}")
 
-                        # Re-instantiate stage 2 dataset in case it needs fresh state
-                        dataset_stage2_new: BaseImageDataset = hydra.utils.instantiate(self._dataset_stage2_cfg)
-                        new_train_dataset = dataset_stage2_new
-                        new_val_dataset = dataset_stage2_new.get_validation_dataset()
-                        new_train_dataloader = DataLoader(new_train_dataset, **dataloader_cfg)
-                        new_val_dataloader = DataLoader(new_val_dataset, **val_dataloader_cfg)
+                    # Build new dataloaders from the pre-instantiated Stage 2 dataset
+                    stage2_train_dataset = self._dataset_stage2
+                    stage2_val_dataset = self._dataset_stage2.get_validation_dataset()
+                    stage2_dataloader_cfg = dict(dataloader_cfg)
+                    stage2_dataloader_cfg["pin_memory"] = False
+                    stage2_val_dataloader_cfg = dict(val_dataloader_cfg)
+                    stage2_val_dataloader_cfg["pin_memory"] = False
+                    new_train_dataloader = DataLoader(stage2_train_dataset, **stage2_dataloader_cfg)
+                    new_val_dataloader = DataLoader(stage2_val_dataset, **stage2_val_dataloader_cfg)
 
-                        # Compute and switch normalizer for stage 2 calibration dataset
-                        dataset_stage2_normalizer = dataset_stage2_new.get_normalizer()
-                        unwrapped_model = accelerator.unwrap_model(self.model)
-                        unwrapped_model.set_normalizer(dataset_stage2_normalizer)
-                        self.teacher_model.set_normalizer(dataset_stage2_normalizer)
-                        self.ema_model.set_normalizer(dataset_stage2_normalizer)
-                        logger.info("Normalizer switched to Stage 2 calibration dataset normalizer")
-                    else:
-                        logger.info("Stage 2 uses same dataset as Stage 1, rebuilding DataLoader")
-                        new_train_dataloader = DataLoader(dataset, **dataloader_cfg)
-                        new_val_dataloader = DataLoader(val_dataset, **val_dataloader_cfg)
+                    # Compute and switch normalizer via pickle (safe for multi-process)
+                    normalizer_path_stage2 = os.path.join(self.output_dir, "normalizer_stage2.pkl")
+                    if accelerator.is_main_process:
+                        normalizer_stage2 = self._dataset_stage2.get_normalizer()
+                        pickle.dump(normalizer_stage2, open(normalizer_path_stage2, "wb"))
+                        logger.info(f"Saved Stage 2 normalizer to {normalizer_path_stage2}")
+                    accelerator.wait_for_everyone()
+                    normalizer_stage2 = pickle.load(open(normalizer_path_stage2, "rb"))
 
-                    train_dataloader, val_dataloader, lr_scheduler = self._rebuild_for_stage(
+                    unwrapped_model = accelerator.unwrap_model(self.model)
+                    unwrapped_model.set_normalizer(normalizer_stage2)
+                    self.teacher_model.set_normalizer(normalizer_stage2)
+                    self.ema_model.set_normalizer(normalizer_stage2)
+                    self.teacher_model.to(device)
+                    self.ema_model.to(device)
+                    logger.info("Normalizer switched to Stage 2 dataset normalizer")
+
+                    new_train_dataloader, new_val_dataloader, lr_scheduler = self._rebuild_for_stage(
                         cfg,
                         accelerator,
                         new_train_dataloader,
                         new_val_dataloader,
                         stage=2,
                         stage_epochs=self.stage2_epochs,
-                        scheduler_steps_per_epoch=scheduler_steps_per_epoch,
                     )
+                    train_dataloader = new_train_dataloader
+                    val_dataloader = new_val_dataloader
+
+                # ========= Stage transition: Stage 2 -> Stage 3 ==========
                 elif local_epoch_idx == stage3_start - 1 and self.stage3_epochs > 0:
                     self._save_named_checkpoint(accelerator, "stage2_final.ckpt")
                     self._sync_model_from_ema(accelerator)
                     self._reset_ema(ema)
                     self._refresh_teacher_from_model(accelerator)
-                    train_dataloader, val_dataloader, lr_scheduler = self._rebuild_for_stage(
+
+                    # Switch back to Stage 1 dataset for Stage 3
+                    logger.info("Switching back to Stage 1 dataset for Stage 3")
+
+                    # Build new dataloaders from the pre-instantiated Stage 1 dataset
+                    stage3_train_dataset = self._dataset_stage1
+                    stage3_val_dataset = self._dataset_stage1.get_validation_dataset()
+                    stage3_dataloader_cfg = dict(dataloader_cfg)
+                    stage3_dataloader_cfg["pin_memory"] = False
+                    stage3_val_dataloader_cfg = dict(val_dataloader_cfg)
+                    stage3_val_dataloader_cfg["pin_memory"] = False
+                    new_train_dataloader = DataLoader(stage3_train_dataset, **stage3_dataloader_cfg)
+                    new_val_dataloader = DataLoader(stage3_val_dataset, **stage3_val_dataloader_cfg)
+
+                    # Switch normalizer back to Stage 1 dataset normalizer via pickle
+                    unwrapped_model = accelerator.unwrap_model(self.model)
+                    unwrapped_model.set_normalizer(normalizer)
+                    self.teacher_model.set_normalizer(normalizer)
+                    self.ema_model.set_normalizer(normalizer)
+                    self.teacher_model.to(device)
+                    self.ema_model.to(device)
+                    logger.info("Normalizer switched back to Stage 1 dataset normalizer")
+
+                    new_train_dataloader, new_val_dataloader, lr_scheduler = self._rebuild_for_stage(
                         cfg,
                         accelerator,
-                        train_dataloader,
-                        val_dataloader,
+                        new_train_dataloader,
+                        new_val_dataloader,
                         stage=3,
                         stage_epochs=self.stage3_epochs,
-                        scheduler_steps_per_epoch=scheduler_steps_per_epoch,
                     )
+                    train_dataloader = new_train_dataloader
+                    val_dataloader = new_val_dataloader
 
                 self.epoch += 1
 
