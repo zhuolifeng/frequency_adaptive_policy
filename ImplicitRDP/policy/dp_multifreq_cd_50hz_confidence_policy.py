@@ -753,7 +753,7 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         else:
             trajectory = noisy_trajectory
 
-        if freq_mode == "50hz" and steps == 1:
+        if freq_mode == "50hz" and steps == 1 and self.training_stage == 3:
             t_value = int(self.cd_timestep_grid[0])
             self.noise_scheduler.set_timesteps(1, device=trajectory.device)
             t = torch.tensor(t_value, dtype=torch.long, device=trajectory.device)

@@ -76,6 +76,15 @@ def main(cfg):
             f"Expected DPMultiFreqCD50HzConfidencePolicy, got {type(policy)}"
         )
 
+    configured_stage = cfg.get("training_stage", "auto")
+    if configured_stage is None or str(configured_stage).lower() == "auto":
+        checkpoint_stage = getattr(workspace, "current_stage", None)
+        eval_stage = checkpoint_stage if checkpoint_stage is not None else policy.training_stage
+    else:
+        eval_stage = int(configured_stage)
+    policy.set_training_stage(int(eval_stage))
+    logger.info(f"Evaluation training_stage={policy.training_stage}")
+
     num_inference_steps_10hz = int(cfg.get("num_inference_steps_10hz", 5))
     num_inference_steps_50hz = int(cfg.get("num_inference_steps_50hz", 1))
     logger.info(
@@ -141,6 +150,11 @@ def main(cfg):
     use_confidence_curve = bool(
         getattr(policy, "use_confidence_based_head_selection", False)
     )
+    if policy.training_stage == 1 and use_confidence_curve:
+        logger.warning(
+            "Stage 1 confidence head is untrained; set CONFIDENCE_SELECTION=False "
+            "when comparing DP backbone behavior."
+        )
     confidence_threshold = (
         getattr(policy, "confidence_threshold_for_head_selection", None)
         if use_confidence_curve

@@ -523,22 +523,17 @@ class TrainDPMultiFreqCD50HzConfidenceWorkspace(BaseWorkspace):
                     new_train_dataloader = DataLoader(stage2_train_dataset, **stage2_dataloader_cfg)
                     new_val_dataloader = DataLoader(stage2_val_dataset, **stage2_val_dataloader_cfg)
 
-                    # Compute and switch normalizer via pickle (safe for multi-process)
-                    normalizer_path_stage2 = os.path.join(self.output_dir, "normalizer_stage2.pkl")
-                    if accelerator.is_main_process:
-                        normalizer_stage2 = self._dataset_stage2.get_normalizer()
-                        pickle.dump(normalizer_stage2, open(normalizer_path_stage2, "wb"))
-                        logger.info(f"Saved Stage 2 normalizer to {normalizer_path_stage2}")
-                    accelerator.wait_for_everyone()
-                    normalizer_stage2 = pickle.load(open(normalizer_path_stage2, "rb"))
-
                     unwrapped_model = accelerator.unwrap_model(self.model)
-                    unwrapped_model.set_normalizer(normalizer_stage2)
-                    self.teacher_model.set_normalizer(normalizer_stage2)
-                    self.ema_model.set_normalizer(normalizer_stage2)
+                    # Keep the DP backbone in the Stage 1 coordinate system.
+                    # Stage 2 only changes the calibration samples used to train
+                    # confidence; swapping normalizers would change the frozen
+                    # backbone's input/output mapping and save incompatible ckpts.
+                    unwrapped_model.set_normalizer(normalizer)
+                    self.teacher_model.set_normalizer(normalizer)
+                    self.ema_model.set_normalizer(normalizer)
                     self.teacher_model.to(device)
                     self.ema_model.to(device)
-                    logger.info("Normalizer switched to Stage 2 dataset normalizer")
+                    logger.info("Stage 2 keeps Stage 1 dataset normalizer")
 
                     new_train_dataloader, new_val_dataloader, lr_scheduler = self._rebuild_for_stage(
                         cfg,
