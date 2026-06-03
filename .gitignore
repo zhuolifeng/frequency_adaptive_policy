@@ -149,6 +149,10 @@ implicitrdp_venv/
 consistency_models/
 consistency-policy
 imeanflow/
+pMF/
+SDM-Policy/
+JiT/
+DMD2/
 *.mp4
 metrics.json
 Flow-Before-Imitation-main

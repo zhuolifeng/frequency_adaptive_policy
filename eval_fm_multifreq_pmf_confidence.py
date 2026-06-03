@@ -177,6 +177,15 @@ def main(cfg):
             f"Expected FMMultiFreqPMFConfidencePolicy, got {type(policy)}"
         )
 
+    configured_stage = cfg.get("training_stage", "auto")
+    if configured_stage is None or str(configured_stage).lower() == "auto":
+        checkpoint_stage = getattr(workspace, "current_stage", None)
+        eval_stage = checkpoint_stage if checkpoint_stage is not None else policy.training_stage
+    else:
+        eval_stage = int(configured_stage)
+    policy.set_training_stage(int(eval_stage))
+    logger.info(f"Evaluation training_stage={policy.training_stage}")
+
     configured_inference_steps = cfg.get('num_inference_steps', None)
     if configured_inference_steps is not None:
         original_inference_steps = getattr(policy, 'num_inference_steps', None)
@@ -190,6 +199,11 @@ def main(cfg):
         "Confidence head: "
         f"{'enabled' if policy.confidence_head is not None else 'disabled'}"
     )
+    if policy.training_stage == 1 and getattr(policy, "use_confidence_based_head_selection", False):
+        logger.warning(
+            "Stage 1 confidence head is untrained; set CONFIDENCE_SELECTION=False "
+            "when comparing PMF backbone behavior."
+        )
 
     device = torch.device(cfg.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
     policy.eval().to(device)

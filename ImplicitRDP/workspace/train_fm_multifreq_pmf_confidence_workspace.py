@@ -477,13 +477,15 @@ class TrainFMMultiFreqPMFConfidenceWorkspace(BaseWorkspace):
                     new_train_dataloader = DataLoader(stage2_train_dataset, **stage2_dataloader_cfg)
                     new_val_dataloader = DataLoader(stage2_val_dataset, **stage2_val_dataloader_cfg)
 
-                    normalizer_stage2 = self._dataset_stage2.get_normalizer()
-
                     unwrapped_model = accelerator.unwrap_model(self.model)
-                    unwrapped_model.set_normalizer(normalizer_stage2)
-                    self.ema_model.set_normalizer(normalizer_stage2)
+                    # Keep the frozen PMF backbone in the Stage 1 coordinate system.
+                    # Stage 2 changes only the calibration samples used for confidence;
+                    # switching normalizers would change the base policy mapping and
+                    # save checkpoints that no longer match the Stage 1 backbone.
+                    unwrapped_model.set_normalizer(normalizer)
+                    self.ema_model.set_normalizer(normalizer)
                     self.ema_model.to(device)
-                    logger.info("Normalizer switched to Stage 2 dataset normalizer")
+                    logger.info("Stage 2 keeps Stage 1 dataset normalizer")
 
                     new_train_dataloader, new_val_dataloader, lr_scheduler = (
                         self._rebuild_for_stage(
