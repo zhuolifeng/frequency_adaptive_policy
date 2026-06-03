@@ -12,6 +12,7 @@ from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
 from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
 from ImplicitRDP.policy.fm_multifreq_rdt_action_chunk_policy import FMMultiFreqRDTActionChunkPolicy
 from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
+from ImplicitRDP.policy.dp_multifreq_cd_50hz_confidence_policy import DPMultiFreqCD50HzConfidencePolicy
 from ImplicitRDP.policy.act_50hz_policy import ACT50HzPolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
@@ -91,6 +92,41 @@ def main(cfg):
         logger.info(f"FMMultiFreqConfidencePolicy: inference_head={policy.inference_head}, "
                     f"use_confidence={policy.use_confidence_based_head_selection}, "
                     f"threshold={policy.confidence_threshold_for_head_selection}")
+    elif isinstance(policy, DPMultiFreqCD50HzConfidencePolicy):
+        # DP Multi-Frequency CD 50Hz + Confidence policy
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        # training stage: 1=DP base, 2=confidence, 3=CD
+        training_stage = int(cfg.policy.get('training_stage', 3))
+        policy.set_training_stage(training_stage)
+        # inference head: "10hz" or "50hz"
+        policy.inference_head = cfg.policy.get('inference_head', '50hz')
+        # per-head inference steps (stage 3 + 50hz + steps=1 triggers one-step jump)
+        policy.num_inference_steps = int(cfg.policy.get('num_inference_steps', 5))
+        policy.num_inference_steps_10hz = int(
+            cfg.policy.get('num_inference_steps_10hz', policy.num_inference_steps)
+        )
+        policy.num_inference_steps_50hz = int(
+            cfg.policy.get('num_inference_steps_50hz', policy.num_inference_steps)
+        )
+        # confidence-based head selection
+        policy.use_confidence_based_head_selection = bool(
+            cfg.policy.get('use_confidence_based_head_selection', False)
+        )
+        policy.confidence_threshold_for_head_selection = float(
+            cfg.policy.get('confidence_threshold_for_head_selection', 0.0)
+        )
+        logger.info(
+            f"DPMultiFreqCD50HzConfidencePolicy: training_stage={training_stage}, "
+            f"inference_head={policy.inference_head}, "
+            f"steps_10hz={policy.num_inference_steps_10hz}, "
+            f"steps_50hz={policy.num_inference_steps_50hz}, "
+            f"use_confidence={policy.use_confidence_based_head_selection}, "
+            f"threshold={policy.confidence_threshold_for_head_selection}"
+        )
     elif isinstance(policy, DPCTMMultiFreqPolicy):
         # DP-CTM Multi-Frequency policy
         policy = workspace.model

@@ -1,20 +1,20 @@
 #!/bin/bash
 
-GPU_ID="${GPU_ID:-0,1,2,3,4,5,6,7}"
+GPU_ID="${GPU_ID:-0,1,2,3}"
 TASK="${TASK:-dual_switch}"
 TASK_CONFIG="${TASK_CONFIG:-real_${TASK}_image_wrench_offline_10fps_acp}"
 
 # Stage 1 dataset
-STAGE1_DATASET_VERSION="${STAGE1_DATASET_VERSION:-v3}"
+STAGE1_DATASET_VERSION="${STAGE1_DATASET_VERSION:-v6}"
 STAGE1_ROUND="${STAGE1_ROUND:-1}"
-STAGE1_DATASET_PATH="${STAGE1_DATASET_PATH:-/mnt/data/users/lifeng/${TASK}_${STAGE1_DATASET_VERSION}_round_${STAGE1_ROUND}_zarr}"
+STAGE1_DATASET_PATH="${STAGE1_DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${STAGE1_DATASET_VERSION}_round_${STAGE1_ROUND}_zarr}"
 
 # Stage 2 dataset (if different from stage 1)
 #v3.1
 #v6.1
-STAGE2_DATASET_VERSION="${STAGE2_DATASET_VERSION:-v3.4}"
+STAGE2_DATASET_VERSION="${STAGE2_DATASET_VERSION:-v6.1}"
 STAGE2_ROUND="${STAGE2_ROUND:-1}"
-STAGE2_DATASET_PATH="${STAGE2_DATASET_PATH:-/mnt/data/users/lifeng/${TASK}_${STAGE2_DATASET_VERSION}_round_${STAGE2_ROUND}_zarr}"
+STAGE2_DATASET_PATH="${STAGE2_DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${STAGE2_DATASET_VERSION}_round_${STAGE2_ROUND}_zarr}"
 
 # Training epochs
 STAGE1_EPOCHS="${STAGE1_EPOCHS:-800}"

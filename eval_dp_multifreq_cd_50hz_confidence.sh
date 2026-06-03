@@ -1,22 +1,22 @@
 #!/bin/bash
 
 TASK="${TASK:-dual_switch}"
-DATASET_VERSION="${DATASET_VERSION:-v6.2}"
+DATASET_VERSION="${DATASET_VERSION:-v4.2}"
 ROUND="${ROUND:-1}"
 
 CONFIG_NAME="${CONFIG_NAME:-train_dp_multifreq_cd_50hz_confidence_workspace}"
-CKPT_PATH="${CKPT_PATH:-/mnt/workspace/users/lifeng/frequency_adaptive_policy_flow/data/outputs/2026.06.01/01.05.58_train_dp_multifreq_cd_50hz_confidence_workspace_dual_switch_v6_dp_multifreq_cd_50hz_confidence/checkpoints/stage2_final.ckpt}"
-DATASET_PATH="${DATASET_PATH:-/mnt/workspace/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.06.02/12.54.56_train_dp_multifreq_cd_50hz_confidence_workspace_dual_switch_v4_dp_multifreq_cd_50hz_confidence/checkpoints/epoch=1290-stage3-train_loss=0.000.ckpt}"
+DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
-GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
+GPU_DEVICE="${GPU_DEVICE:-cuda:2}"
 VIDEO_FPS="${VIDEO_FPS:-1}"
 NUM_INFERENCE_STEPS_10HZ="${NUM_INFERENCE_STEPS_10HZ:-3}"
-NUM_INFERENCE_STEPS_50HZ="${NUM_INFERENCE_STEPS_50HZ:-3}"
+NUM_INFERENCE_STEPS_50HZ="${NUM_INFERENCE_STEPS_50HZ:-1}"
 PREDICTION_TYPE="${PREDICTION_TYPE:-sample}"
-TRAINING_STAGE="${TRAINING_STAGE:-auto}"
+TRAINING_STAGE="${TRAINING_STAGE:-3}"
 CONFIDENCE_SELECTION="${CONFIDENCE_SELECTION:-True}"
 CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-3.5}"
-OUTPUT_DIR="${OUTPUT_DIR:-evaluations_dp_multifreq_cd_50hz_confidence_10hz${NUM_INFERENCE_STEPS_10HZ}steps_50hz${NUM_INFERENCE_STEPS_50HZ}steps}"
+OUTPUT_DIR="${OUTPUT_DIR:-evaluations_dp_multifreq_cd_50hz_confidence_v4_900_300_100_1samples/10hz_${NUM_INFERENCE_STEPS_10HZ}steps_50hz${NUM_INFERENCE_STEPS_50HZ}steps_${TRAINING_STAGE}stage}"
 
 TRAINING_STAGE_ARG=""
 if [ "${TRAINING_STAGE}" != "auto" ]; then

@@ -159,11 +159,12 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
+  backend: tensorboard
   project: diffusion_policy_transformer_tactile
   resume: False
   mode: online
-  name: ${now:%Y.%m.%d-%H.%M-%S}_${name}_${task_name}
-  tags: ["stagewise", "single_encoder"]
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
   id: null
   group: null
 

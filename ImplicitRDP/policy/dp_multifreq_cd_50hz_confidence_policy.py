@@ -36,6 +36,8 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         n_action_steps: int,
         n_obs_steps: int,
         num_inference_steps: int = 5,
+        num_inference_steps_10hz: Optional[int] = None,
+        num_inference_steps_50hz: Optional[int] = None,
         n_emb: int = 768,
         use_rnn_obs_encoder: bool = True,
         rnn_obs_encoder_n_layer: int = 1,
@@ -125,6 +127,16 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         self.n_obs_steps = n_obs_steps
         self.n_emb = n_emb
         self.num_inference_steps = num_inference_steps
+        self.num_inference_steps_10hz = (
+            int(num_inference_steps_10hz)
+            if num_inference_steps_10hz is not None
+            else int(num_inference_steps)
+        )
+        self.num_inference_steps_50hz = (
+            int(num_inference_steps_50hz)
+            if num_inference_steps_50hz is not None
+            else int(num_inference_steps)
+        )
         self.action_start_10hz = action_start_10hz
         self.action_start_50hz = action_start_50hz
         self.inference_head = inference_head
@@ -959,6 +971,23 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
             "both 10hz and 50hz heads."
         )
 
+    def sample_noisy_trajectory(
+        self,
+        B: int = 1,
+        generator=None,
+        obs_tokens: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, str]:
+        head = self.inference_head
+        horizon = self.horizon_50hz if head == "50hz" else self.horizon_10hz
+        noisy = torch.randn(
+            (B, horizon, self.action_dim),
+            dtype=torch.float32,
+            device=self.device,
+            generator=generator,
+        )
+        noisy = noisy.reshape(B, -1)
+        return noisy, head
+
     def _predict_from_obs_tokens_and_noisy_trajectory(
         self,
         obs_tokens_and_noisy_trajectory_list: List[torch.Tensor],
@@ -972,19 +1001,41 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         batch_size = packed.shape[0]
         packed_head = self._infer_head_from_packed_tokens(packed, head)
         packed_horizon = self.horizon_50hz if packed_head == "50hz" else self.horizon_10hz
-        obs_tokens = packed[:, :-packed_horizon * self.action_dim]
-        noisy_trajectory = packed[:, -packed_horizon * self.action_dim:]
-        obs_tokens = obs_tokens.to(self.device).reshape(batch_size, -1, self.n_emb)
-        noisy_trajectory = noisy_trajectory.to(self.device).reshape(
+        obs_tokens_flat = packed[:, :-packed_horizon * self.action_dim]
+        noisy_flat = packed[:, -packed_horizon * self.action_dim:]
+        obs_tokens = obs_tokens_flat.to(self.device).reshape(batch_size, -1, self.n_emb)
+        noisy_trajectory = noisy_flat.to(self.device).reshape(
             batch_size, packed_horizon, self.action_dim
         )
 
-        selected_head, confidence_value = self._get_inference_head(obs_tokens)
-        if not self.use_confidence_based_head_selection:
-            selected_head = packed_head
+        confidence_value = None
+        if self.use_confidence_based_head_selection and self.confidence_head is not None:
+            tcp_obs_tokens = obs_tokens[:1]
+            confidence_value, _ = self._confidence_value(tcp_obs_tokens)
+            if confidence_value is None:
+                logger.warning(
+                    "Confidence returned None, falling back to inference_head=%s",
+                    self.inference_head,
+                )
+                selected_head = self.inference_head
+            else:
+                selected_head = (
+                    "50hz"
+                    if confidence_value > self.confidence_threshold_for_head_selection
+                    else "10hz"
+                )
+        else:
+            selected_head = self.inference_head
+
         target_horizon = self.horizon_50hz if selected_head == "50hz" else self.horizon_10hz
         if selected_head != packed_head:
             noisy_trajectory = None
+
+        steps = (
+            self.num_inference_steps_50hz
+            if selected_head == "50hz"
+            else self.num_inference_steps_10hz
+        )
 
         max_last_step = max(extended_obs_last_step_list)
         assert extended_obs_dict is not None, "extended_obs is required for RNN temporal condition"
@@ -1031,6 +1082,7 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
             obs_tokens,
             temporal_cond,
             selected_head,
+            num_inference_steps=steps,
             noisy_trajectory=noisy_trajectory,
         )
         if selected_head == "50hz":

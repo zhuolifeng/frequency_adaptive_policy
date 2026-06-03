@@ -81,6 +81,8 @@ policy:
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
   num_inference_steps: 5
+  num_inference_steps_10hz: 2
+  num_inference_steps_50hz: 2
 
   use_rnn_obs_encoder: True
   rnn_obs_encoder_n_layer: 1
@@ -182,7 +184,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
-  backend: wandb
+  backend: tensorboard
   project: dp_multifreq_cd_50hz_confidence_policy
   resume: False
   mode: online
