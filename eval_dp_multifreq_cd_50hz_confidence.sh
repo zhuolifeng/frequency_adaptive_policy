@@ -13,6 +13,7 @@ VIDEO_FPS="${VIDEO_FPS:-1}"
 NUM_INFERENCE_STEPS_10HZ="${NUM_INFERENCE_STEPS_10HZ:-3}"
 NUM_INFERENCE_STEPS_50HZ="${NUM_INFERENCE_STEPS_50HZ:-1}"
 PREDICTION_TYPE="${PREDICTION_TYPE:-sample}"
+LOSS_TYPE="${LOSS_TYPE:-eps}"
 TRAINING_STAGE="${TRAINING_STAGE:-3}"
 CONFIDENCE_SELECTION="${CONFIDENCE_SELECTION:-True}"
 CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-3.5}"
@@ -36,6 +37,7 @@ echo "Dataset:    ${DATASET_PATH}"
 echo "Stage:      ${TRAINING_STAGE}"
 echo "10Hz steps: ${NUM_INFERENCE_STEPS_10HZ}"
 echo "50Hz steps: ${NUM_INFERENCE_STEPS_50HZ}"
+echo "Loss type:  ${LOSS_TYPE}"
 echo "Confidence selection: ${CONFIDENCE_SELECTION}"
 echo "Output dir: ${OUTPUT_DIR}"
 
@@ -47,6 +49,7 @@ python eval_dp_multifreq_cd_50hz_confidence.py \
     "task=real_${TASK}_image_wrench_offline_10fps_acp" \
     "task.dataset_path=${DATASET_PATH}" \
     "prediction_type=${PREDICTION_TYPE}" \
+    "loss_type=${LOSS_TYPE}" \
     ${TRAINING_STAGE_ARG} \
     "+use_full_dataset=True" \
     "+num_inference_steps_10hz=${NUM_INFERENCE_STEPS_10HZ}" \

@@ -18,9 +18,7 @@ from torch.cuda.amp import autocast
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.model.common.normalizer import LinearNormalizer
 from ImplicitRDP.model.confidence.transformer import TransformerConfidenceHead
-from ImplicitRDP.model.diffusion.transformer_for_dp_multifreq import (
-    TransformerForDPMultiFreq,
-)
+from ImplicitRDP.model.diffusion.transformer_for_dp_multifreq import TransformerForDPMultiFreq
 from ImplicitRDP.model.force.rnn import RNN
 from ImplicitRDP.policy.base_image_policy import BaseImagePolicy
 
@@ -35,7 +33,6 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         horizon: int,
         n_action_steps: int,
         n_obs_steps: int,
-        num_inference_steps: int = 5,
         num_inference_steps_10hz: Optional[int] = None,
         num_inference_steps_50hz: Optional[int] = None,
         n_emb: int = 768,
@@ -54,23 +51,18 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         cd_weight: float = 1.0,
         dsm_weight: float = 1.0,
         loss_10hz_weight: float = 1.0,
+        loss_type: str = "eps",
         use_confidence_head: bool = True,
-        confidence_head_type: str = "transformer",
         confidence_hidden_dim: Optional[int] = None,
         confidence_gamma: float = 1.0,
         confidence_alpha: float = 0.2,
-        confidence_log_sigma_min: float = -100.0,
-        confidence_log_sigma_max: float = 100.0,
-        confidence_clamp_log_sigma: bool = False,
         confidence_obs_encoder_n_layers: int = 2,
         confidence_obs_encoder_hidden_dim: Optional[int] = None,
         confidence_transformer_n_heads: int = 8,
         confidence_transformer_dropout: float = 0.1,
         confidence_action_dims: int = 6,
-        normalize_confidence_loss: bool = False,
         confidence_n_samples: int = 8,
         confidence_num_inference_steps: int = 5,
-        confidence_threshold: float = 0.0,
         use_confidence_based_head_selection: bool = False,
         confidence_threshold_for_head_selection: float = 0.0,
         training_stage: int = 1,
@@ -126,17 +118,8 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
         self.n_emb = n_emb
-        self.num_inference_steps = num_inference_steps
-        self.num_inference_steps_10hz = (
-            int(num_inference_steps_10hz)
-            if num_inference_steps_10hz is not None
-            else int(num_inference_steps)
-        )
-        self.num_inference_steps_50hz = (
-            int(num_inference_steps_50hz)
-            if num_inference_steps_50hz is not None
-            else int(num_inference_steps)
-        )
+        self.num_inference_steps_10hz = int(num_inference_steps_10hz)
+        self.num_inference_steps_50hz = int(num_inference_steps_50hz)
         self.action_start_10hz = action_start_10hz
         self.action_start_50hz = action_start_50hz
         self.inference_head = inference_head
@@ -159,24 +142,27 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         self.cd_weight = float(cd_weight)
         self.dsm_weight = float(dsm_weight)
         self.loss_10hz_weight = float(loss_10hz_weight)
+        self.loss_type = (loss_type or "eps").lower()
+        if self.loss_type == "epsilon":
+            self.loss_type = "eps"
+        if self.loss_type in ("v", "v_prediction"):
+            self.loss_type = "velocity"
+        if self.loss_type not in ("sample", "eps", "velocity"):
+            raise ValueError(
+                f"Unsupported loss_type={loss_type}; expected sample, eps, or velocity."
+            )
 
         self.confidence_gamma = confidence_gamma
         self.confidence_alpha = confidence_alpha
         self.use_confidence_head = use_confidence_head
         self.confidence_action_dims = confidence_action_dims
-        self.normalize_confidence_loss = normalize_confidence_loss
         self.confidence_n_samples = int(confidence_n_samples)
         self.confidence_num_inference_steps = int(confidence_num_inference_steps)
-        self.confidence_threshold = float(confidence_threshold)
         self.use_confidence_based_head_selection = use_confidence_based_head_selection
-        self.confidence_threshold_for_head_selection = float(
-            confidence_threshold_for_head_selection
-        )
+        self.confidence_threshold_for_head_selection = float(confidence_threshold_for_head_selection)
 
         self.confidence_head = None
         if self.use_confidence_head:
-            if (confidence_head_type or "transformer").lower() != "transformer":
-                raise ValueError("Only transformer confidence_head_type is supported.")
             hidden_dim = confidence_hidden_dim or n_emb
             self.confidence_head = TransformerConfidenceHead(
                 n_emb=n_emb,
@@ -184,10 +170,7 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
                 obs_encoder_n_layers=confidence_obs_encoder_n_layers,
                 obs_encoder_hidden_dim=confidence_obs_encoder_hidden_dim,
                 n_heads=confidence_transformer_n_heads,
-                dropout=confidence_transformer_dropout,
-                log_sigma_min=confidence_log_sigma_min,
-                log_sigma_max=confidence_log_sigma_max,
-                clamp_log_sigma=confidence_clamp_log_sigma,
+                dropout=confidence_transformer_dropout
             )
 
         self.training_stage = int(training_stage)
@@ -248,6 +231,8 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         head: str,
         extended_obs_last_step: Optional[int] = None,
         extend_obs_pad_after_n: Optional[int] = None,
+        allow_partial: bool = False,
+        post_process: bool = False,
     ):
         if extended_obs_dict is None:
             return None
@@ -256,12 +241,16 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
                 extended_obs_dict,
                 extended_obs_last_step=extended_obs_last_step,
                 extend_obs_pad_after_n=extend_obs_pad_after_n,
+                allow_partial=allow_partial,
+                post_process=post_process,
             )
         if head == "50hz":
             return self.get_temporal_cond_highfreq(
                 extended_obs_dict,
                 extended_obs_last_step=extended_obs_last_step,
                 extend_obs_pad_after_n=extend_obs_pad_after_n,
+                allow_partial=allow_partial,
+                post_process=post_process,
             )
         raise ValueError(f"Unsupported head={head}")
 
@@ -270,54 +259,137 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         extended_obs_dict,
         extended_obs_last_step: Optional[int] = None,
         extend_obs_pad_after_n: Optional[int] = None,
+        allow_partial: bool = False,
+        post_process: bool = False,
     ):
-        key = "right_robot_tcp_wrench_stack"
-        extended_obs = (
-            extended_obs_dict[key][..., -extended_obs_last_step:, :]
-            if extended_obs_last_step is not None
-            else extended_obs_dict[key]
-        )
-        if extend_obs_pad_after_n is not None:
-            padding_obs = extended_obs_dict[key][..., -1:, :].repeat(
-                1, extend_obs_pad_after_n, 1
-            )
-            extended_obs = torch.cat([padding_obs, extended_obs], dim=-2)
-        extended_obs = self.normalizer[f"extended_{key}"].normalize(extended_obs)
-        return self.rnn_highfreq(extended_obs) if self.rnn_highfreq is not None else None
+        if extended_obs_dict is None or len(self.extended_obs_keys) == 0:
+            return None
+        extended_obs_keys = ["right_robot_tcp_wrench_stack"]
+
+        temporal_cond = []
+        for extended_obs_key in extended_obs_keys:
+            if extended_obs_key not in extended_obs_dict:
+                if allow_partial:
+                    continue
+                raise KeyError(f"Missing extended obs key: {extended_obs_key}")
+            
+            extended_obs = extended_obs_dict[extended_obs_key]
+            obs_dim = len(self.shape_meta['extended_obs'][extended_obs_key]['shape'])
+            
+            if extended_obs_last_step is not None:
+                if obs_dim == 1:
+                    extended_obs = extended_obs[..., -extended_obs_last_step:, :]
+                elif obs_dim == 2:
+                    extended_obs = extended_obs[..., -extended_obs_last_step:, :, :]
+                else:
+                    raise ValueError("Only support 1d or 2d extended obs")
+            
+            if extend_obs_pad_after_n is not None:
+                if obs_dim == 1:
+                    padding_obs = extended_obs_dict[extended_obs_key][..., -1:, :].repeat(1, extend_obs_pad_after_n, 1)
+                elif obs_dim == 2:
+                    padding_obs = extended_obs_dict[extended_obs_key][..., -1:, :, :].repeat(1, extend_obs_pad_after_n, 1, 1)
+                else:
+                    raise ValueError("Only support 1d or 2d extended obs")
+                extended_obs = torch.cat([padding_obs, extended_obs], dim=-2)
+            
+            extended_obs = self.normalizer[f"extended_{extended_obs_key}"].normalize(extended_obs)
+            temporal_cond.append(extended_obs)
+        
+        if len(temporal_cond) == 0:
+            return None
+        
+        temporal_cond = torch.cat(temporal_cond, dim=-1)
+
+        if post_process and self.rnn_highfreq is not None:
+            temporal_cond = self.rnn_highfreq(temporal_cond)
+
+        return temporal_cond
 
     def get_temporal_cond_lowfreq(
         self,
         extended_obs_dict,
         extended_obs_last_step: Optional[int] = None,
         extend_obs_pad_after_n: Optional[int] = None,
+        allow_partial: bool = False,
+        post_process: bool = False,
     ):
-        key = "right_robot_tcp_wrench"
-        extended_obs = (
-            extended_obs_dict[key][..., -extended_obs_last_step:, :]
-            if extended_obs_last_step is not None
-            else extended_obs_dict[key]
-        )
-        if extend_obs_pad_after_n is not None:
-            padding_obs = extended_obs_dict[key][..., -1:, :].repeat(
-                1, extend_obs_pad_after_n, 1
-            )
-            extended_obs = torch.cat([padding_obs, extended_obs], dim=-2)
-        extended_obs = self.normalizer[f"extended_{key}"].normalize(extended_obs)
-        return self.rnn_lowfreq(extended_obs) if self.rnn_lowfreq is not None else None
+        if extended_obs_dict is None or len(self.extended_obs_keys) == 0:
+            return None
+        extended_obs_keys = ["right_robot_tcp_wrench"]
 
-    def _encode_obs(self, obs_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        temporal_cond = []
+        for extended_obs_key in extended_obs_keys:
+            if extended_obs_key not in extended_obs_dict:
+                if allow_partial:
+                    continue
+                raise KeyError(f"Missing extended obs key: {extended_obs_key}")
+
+            extended_obs = extended_obs_dict[extended_obs_key]
+            obs_dim = len(self.shape_meta['extended_obs'][extended_obs_key]['shape'])
+
+            if extended_obs_last_step is not None:
+                if obs_dim == 1:
+                    extended_obs = extended_obs[..., -extended_obs_last_step:, :]
+                elif obs_dim == 2:
+                    extended_obs = extended_obs[..., -extended_obs_last_step:, :, :]
+                else:
+                    raise ValueError("Only support 1d or 2d extended obs")
+
+            if extend_obs_pad_after_n is not None:
+                if obs_dim == 1:
+                    padding_obs = extended_obs_dict[extended_obs_key][..., -1:, :].repeat(1, extend_obs_pad_after_n, 1)
+                elif obs_dim == 2:
+                    padding_obs = extended_obs_dict[extended_obs_key][..., -1:, :, :].repeat(1, extend_obs_pad_after_n, 1, 1)
+                else:
+                    raise ValueError("Only support 1d or 2d extended obs")
+                extended_obs = torch.cat([padding_obs, extended_obs], dim=-2)
+
+            extended_obs = self.normalizer[f"extended_{extended_obs_key}"].normalize(extended_obs)
+            temporal_cond.append(extended_obs)
+
+        if len(temporal_cond) == 0:
+            return None
+
+        temporal_cond = torch.cat(temporal_cond, dim=-1)
+
+        if post_process and self.rnn_lowfreq is not None:
+            temporal_cond = self.rnn_lowfreq(temporal_cond)
+
+        return temporal_cond
+
+    def _predict_obs_tokens(self,
+                            obs_dict: Dict[str, torch.Tensor],
+                            extended_obs_dict: Optional[Dict[str, torch.Tensor]] = None,
+                            return_expanded_obs_tokens: bool = False,
+                            return_temporal_cond: bool = False,
+                            head: str = "10hz"
+                            ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         nobs = self.normalizer.normalize(obs_dict)
-        batch_size = next(iter(nobs.values())).shape[0]
+        B = next(iter(nobs.values())).shape[0]
+
         this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
+
         obs_tokens = self.obs_encoder(this_nobs)
         if len(obs_tokens.shape) == 2:
-            obs_tokens = obs_tokens.reshape(batch_size, -1, *obs_tokens.shape[1:])
+            obs_tokens = obs_tokens.reshape(B, -1, *obs_tokens.shape[1:])
+
+        temporal_cond = None
+        if extended_obs_dict is not None:
+            temporal_cond = self.get_temporal_cond(extended_obs_dict, head=head, allow_partial=True, post_process=True)
+
+        if return_temporal_cond:
+            return obs_tokens, temporal_cond
+
+        if return_expanded_obs_tokens:
+            obs_flat = obs_tokens.reshape(B, -1)
+            obs_flat = obs_flat.unsqueeze(1).expand(-1, self.action_horizon, -1)
+            return obs_flat
         return obs_tokens
 
-    def predict_obs_tokens(self, obs_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def predict_obs_tokens(self, *args, **kwargs) -> torch.Tensor:
         with autocast(enabled=self.use_amp_for_inference, dtype=self.amp_dtype):
-            obs_tokens = self._encode_obs(obs_dict)
-            return obs_tokens.reshape(obs_tokens.shape[0], -1)
+            return self._predict_obs_tokens(*args, **kwargs)
 
     def _get_variance_terms(self, timesteps: torch.Tensor, sample: torch.Tensor):
         alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
@@ -336,34 +408,43 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         alpha_prod, beta_prod = self._get_variance_terms(timesteps, sample)
         sqrt_alpha = alpha_prod.sqrt()
         sqrt_beta = beta_prod.sqrt()
-        pred_type = self.noise_scheduler.config.prediction_type
-        if pred_type == "epsilon":
-            pred_eps = model_output
-            pred_x0 = (sample - sqrt_beta * pred_eps) / sqrt_alpha.clamp_min(1e-12)
-        elif pred_type == "sample":
+        if self.loss_type == "velocity":
+            pred_velocity = self._sample_prediction_to_velocity(
+                sample, model_output, timesteps
+            )
+            pred_x0 = sqrt_alpha * sample - sqrt_beta * pred_velocity
+            pred_eps = sqrt_alpha * pred_velocity + sqrt_beta * sample
+        else:
             pred_x0 = model_output
             pred_eps = (sample - sqrt_alpha * pred_x0) / sqrt_beta.clamp_min(1e-12)
-        elif pred_type == "v_prediction":
-            pred_x0 = sqrt_alpha * sample - sqrt_beta * model_output
-            pred_eps = sqrt_alpha * model_output + sqrt_beta * sample
-        else:
-            raise ValueError(f"Unsupported prediction_type={pred_type}")
         return pred_x0, pred_eps
 
-    def _prediction_target(
+    def _sample_prediction_to_velocity(
         self,
+        sample: torch.Tensor,
+        model_output: torch.Tensor,
+        timesteps: torch.Tensor,
+    ):
+        alpha_prod, beta_prod = self._get_variance_terms(timesteps, sample)
+        sqrt_alpha = alpha_prod.sqrt()
+        sqrt_beta = beta_prod.sqrt().clamp_min(1e-12)
+        return (sqrt_alpha * sample - model_output) / sqrt_beta
+
+    def _velocity_loss_from_sample_prediction(
+        self,
+        sample: torch.Tensor,
+        model_output: torch.Tensor,
         trajectory: torch.Tensor,
         noise: torch.Tensor,
         timesteps: torch.Tensor,
     ):
-        pred_type = self.noise_scheduler.config.prediction_type
-        if pred_type == "epsilon":
-            return noise
-        if pred_type == "sample":
-            return trajectory
-        if pred_type == "v_prediction":
-            return self.noise_scheduler.get_velocity(trajectory, noise, timesteps)
-        raise ValueError(f"Unsupported prediction_type={pred_type}")
+        pred_velocity = self._sample_prediction_to_velocity(
+            sample, model_output, timesteps
+        )
+        target_velocity = self.noise_scheduler.get_velocity(
+            trajectory, noise, timesteps
+        )
+        return F.mse_loss(pred_velocity, target_velocity, reduction="none")
 
     def _ddim_jump_to(
         self,
@@ -398,7 +479,14 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         beta_target = 1.0 - alpha_target
         return alpha_target.sqrt() * pred_x0 + beta_target.sqrt() * pred_eps
 
-    def _sample_diffusion_batch(self, trajectory: torch.Tensor):
+    def _compute_dp_loss_one_freq(
+        self,
+        trajectory: torch.Tensor,
+        obs_tokens: torch.Tensor,
+        temporal_cond: Optional[torch.Tensor],
+        freq_mode: str,
+        loss_mask=None,
+    ):
         batch_size = trajectory.shape[0]
         device = trajectory.device
         noise = torch.randn_like(trajectory)
@@ -409,18 +497,6 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
             device=device,
         ).long()
         noisy = self.noise_scheduler.add_noise(trajectory, noise, timesteps)
-        target = self._prediction_target(trajectory, noise, timesteps)
-        return noisy, timesteps, target
-
-    def _compute_dp_loss_one_freq(
-        self,
-        trajectory: torch.Tensor,
-        obs_tokens: torch.Tensor,
-        temporal_cond: Optional[torch.Tensor],
-        freq_mode: str,
-        loss_mask=None,
-    ):
-        noisy, timesteps, target = self._sample_diffusion_batch(trajectory)
         pred = self.model(
             noisy,
             timesteps,
@@ -428,30 +504,40 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
             temporal_cond=temporal_cond,
             freq_mode=freq_mode,
         )
-        loss_all = F.mse_loss(pred, target, reduction="none")
+        if self.loss_type == "sample":
+            loss_all = F.mse_loss(pred, trajectory, reduction="none")
+        elif self.loss_type == "eps":
+            _, pred_eps = self._prediction_to_x0_eps(noisy, pred, timesteps)
+            loss_all = F.mse_loss(pred_eps, noise, reduction="none")
+        elif self.loss_type == "velocity":
+            loss_all = self._velocity_loss_from_sample_prediction(
+                noisy,
+                pred,
+                trajectory,
+                noise,
+                timesteps,
+            )
+        else:
+            raise ValueError(f"Unsupported loss_type={self.loss_type}")
         loss_per = reduce(loss_all, "b ... -> b (...)", "mean")
         if loss_mask is not None:
             loss_per = loss_per[loss_mask]
         return loss_per.mean()
 
     def _prepare_multifreq_inputs(self, batch):
-        nobs = self.normalizer.normalize(batch["obs"])
         nactions_10 = self.normalizer["action"].normalize(batch["action"])
         nactions_50 = self.normalizer["action_stack"].normalize(batch["action_stack"])
-        batch_size = nactions_10.shape[0]
 
         if self.rnn_lowfreq is not None and self.rnn_highfreq is not None:
             assert "extended_obs" in batch, "extended_obs is required for RNNObsEncoder"
-            tc_10 = self.get_temporal_cond(batch["extended_obs"], head="10hz")
-            tc_50 = self.get_temporal_cond(batch["extended_obs"], head="50hz")
+            tc_10 = self.get_temporal_cond(batch["extended_obs"], head="10hz", allow_partial=True, post_process=True)
+            tc_50 = self.get_temporal_cond(batch["extended_obs"], head="50hz", allow_partial=True, post_process=True)
         else:
             tc_10 = None
             tc_50 = None
 
-        this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-        obs_tokens = self.obs_encoder(this_nobs)
-        if len(obs_tokens.shape) == 2:
-            obs_tokens = obs_tokens.reshape(batch_size, -1, *obs_tokens.shape[1:])
+        obs_tokens = self._predict_obs_tokens(batch["obs"])
+
         return obs_tokens, nactions_10, nactions_50, tc_10, tc_50
 
     def compute_stage1_loss(self, batch, loss_mask=None):
@@ -578,9 +664,6 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         full_vec = reduce(per_dim, "b t a -> b", "mean")
         conf_dims = min(self.confidence_action_dims, per_dim.shape[-1])
         conf_loss_all = per_dim[..., :conf_dims]
-        if self.normalize_confidence_loss:
-            gt_sq = nactions_10[..., :conf_dims] ** 2
-            conf_loss_all = conf_loss_all / (gt_sq + 1e-8)
         conf_vec = reduce(conf_loss_all, "b t a -> b", "mean")
         if per_dim.shape[-1] > conf_dims:
             virtual_vec = reduce(per_dim[..., conf_dims:], "b t a -> b", "mean")
@@ -592,20 +675,9 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         return masked.mean(), full_vec, conf_vec, virtual_vec
 
     def compute_confidence_loss(self, batch, loss_mask=None):
-        nobs = self.normalizer.normalize(batch["obs"])
+        obs_tokens = self._predict_obs_tokens(batch["obs"])
         nactions_10 = self.normalizer["action"].normalize(batch["action"])
-        batch_size = nactions_10.shape[0]
-
-        with torch.no_grad():
-            tc_10 = (
-                self.get_temporal_cond(batch["extended_obs"], head="10hz")
-                if self.rnn_lowfreq is not None
-                else None
-            )
-            this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-            obs_tokens = self.obs_encoder(this_nobs)
-            if len(obs_tokens.shape) == 2:
-                obs_tokens = obs_tokens.reshape(batch_size, -1, *obs_tokens.shape[1:])
+        tc_10 = self.get_temporal_cond(batch["extended_obs"], head="10hz", allow_partial=True, post_process=True)
 
         mse, mse_vec, mse_vec_conf, mse_vec_virtual = self._compute_10hz_sample_mse(
             nactions_10, obs_tokens, tc_10, loss_mask
@@ -743,18 +815,23 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
             loss_mask=loss_mask,
         )
 
-    def _ddim_sample(
+    def conditional_sample(
         self,
         cond=None,
         temporal_cond=None,
         freq_mode: str = "10hz",
-        horizon: int = 16,
         generator=None,
         num_inference_steps: Optional[int] = None,
         noisy_trajectory=None,
         **kwargs,
     ):
-        steps = self.num_inference_steps if num_inference_steps is None else int(num_inference_steps)
+        horizon = self.horizon_50hz if freq_mode == "50hz" else self.horizon_10hz
+        default_steps = (
+            self.num_inference_steps_50hz
+            if freq_mode == "50hz"
+            else self.num_inference_steps_10hz
+        )
+        steps = default_steps if num_inference_steps is None else int(num_inference_steps)
         if noisy_trajectory is None:
             trajectory = torch.randn(
                 size=(cond.shape[0], horizon, self.action_dim),
@@ -782,12 +859,12 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
                 temporal_cond=temporal_cond,
                 freq_mode=freq_mode,
             )
-            return self.noise_scheduler.step(
-                model_output, t, trajectory, generator=generator, **self.kwargs
-            ).prev_sample
+            target_t = torch.zeros_like(t_batch)
+            return self._ddim_jump_to(trajectory, model_output, t_batch, target_t)
 
         self.noise_scheduler.set_timesteps(steps, device=trajectory.device)
-        for t in self.noise_scheduler.timesteps:
+        timesteps = self.noise_scheduler.timesteps
+        for step_idx, t in enumerate(timesteps):
             t_batch = torch.full(
                 (trajectory.shape[0],),
                 int(t.item()),
@@ -801,61 +878,30 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
                 temporal_cond=temporal_cond,
                 freq_mode=freq_mode,
             )
-            trajectory = self.noise_scheduler.step(
-                model_output, t, trajectory, generator=generator, **self.kwargs
-            ).prev_sample
+            if step_idx + 1 < len(timesteps):
+                target_value = int(timesteps[step_idx + 1].item())
+            else:
+                target_value = 0
+            target_t = torch.full(
+                (trajectory.shape[0],),
+                target_value,
+                dtype=torch.long,
+                device=trajectory.device,
+            )
+            trajectory = self._ddim_jump_to(trajectory, model_output, t_batch, target_t)
         return trajectory
-
-    def conditional_sample(
-        self,
-        cond=None,
-        temporal_cond=None,
-        freq_mode: str = "10hz",
-        generator=None,
-        num_inference_steps: Optional[int] = None,
-        noisy_trajectory=None,
-        **kwargs,
-    ):
-        horizon = self.horizon_50hz if freq_mode == "50hz" else self.horizon_10hz
-        return self._ddim_sample(
-            cond=cond,
-            temporal_cond=temporal_cond,
-            freq_mode=freq_mode,
-            horizon=horizon,
-            generator=generator,
-            num_inference_steps=num_inference_steps,
-            noisy_trajectory=noisy_trajectory,
-        )
-
-    def _confidence_value(self, obs_tokens: torch.Tensor):
-        if self.confidence_head is None:
-            return None, None
-        obs_tokens_3d = (
-            obs_tokens.reshape(obs_tokens.shape[0], -1, self.n_emb)
-            if len(obs_tokens.shape) == 2
-            else obs_tokens
-        )
-        log_sigma = self._compute_confidence_logits(obs_tokens_3d)
-        if log_sigma is None:
-            return None, None
-        sigma = 1.0 + torch.exp(log_sigma)
-        return torch.log(sigma).mean().item(), log_sigma
 
     def _get_inference_head(self, obs_tokens: Optional[torch.Tensor] = None):
         if not (self.use_confidence_based_head_selection and self.confidence_head is not None):
             return self.inference_head, None
+
         if obs_tokens is None:
             return self.inference_head, None
-        confidence_value, _ = self._confidence_value(obs_tokens)
-        if confidence_value is None:
-            logger.warning("Confidence returned None, falling back to inference_head")
-            return self.inference_head, None
-        selected = (
-            "50hz"
-            if confidence_value > self.confidence_threshold_for_head_selection
-            else "10hz"
-        )
-        return selected, confidence_value
+
+        confidence_value = self._compute_confidence_logits(obs_tokens)
+
+        selected = "50hz" if confidence_value > self.confidence_threshold_for_head_selection else "10hz"
+        return selected, confidence_value.mean().item()
 
     def _predict_one_head(
         self,
@@ -887,89 +933,34 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         obs_dict: Dict[str, torch.Tensor],
         dataset_obs_temporal_downsample_ratio: int = 1,
         extended_obs_dict: Optional[Dict[str, torch.Tensor]] = None,
-        num_inference_steps: Optional[int] = None,
-        num_inference_steps_10hz: Optional[int] = None,
-        num_inference_steps_50hz: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
         assert "past_action" not in obs_dict
         assert extended_obs_dict is not None, "extended_obs is required for RNN temporal condition"
 
-        obs_tokens = self._encode_obs(obs_dict)
-        selected_head, confidence_value = self._get_inference_head(obs_tokens)
-        if confidence_value is None:
-            confidence_value, _ = self._confidence_value(obs_tokens)
+        obs_tokens = self._predict_obs_tokens(obs_dict)
 
-        steps_10hz = num_inference_steps if num_inference_steps_10hz is None else num_inference_steps_10hz
-        steps_50hz = num_inference_steps if num_inference_steps_50hz is None else num_inference_steps_50hz
-
-        tc_10 = self.get_temporal_cond(extended_obs_dict, head="10hz")
-        tc_50 = self.get_temporal_cond(extended_obs_dict, head="50hz")
+        tc_10 = self.get_temporal_cond(extended_obs_dict, head="10hz", allow_partial=True, post_process=True)
+        tc_50 = self.get_temporal_cond(extended_obs_dict, head="50hz", allow_partial=True, post_process=True)
         action_10hz, action_pred_10hz = self._predict_one_head(
-            obs_tokens, tc_10, "10hz", steps_10hz
+            obs_tokens, tc_10, "10hz", self.num_inference_steps_10hz
         )
         action_50hz, action_pred_50hz = self._predict_one_head(
-            obs_tokens, tc_50, "50hz", steps_50hz
+            obs_tokens, tc_50, "50hz", self.num_inference_steps_50hz
         )
 
-        if selected_head == "50hz":
-            action = action_50hz
-            action_pred = action_pred_50hz
-        else:
-            action = action_10hz
-            action_pred = action_pred_10hz
-
         result = {
-            "action": action,
-            "action_pred": action_pred,
+            "action": action_10hz,
+            "action_pred": action_pred_10hz,
             "action_10hz": action_10hz,
             "action_50hz": action_50hz,
             "action_pred_10hz": action_pred_10hz,
             "action_pred_50hz": action_pred_50hz,
-            "selected_freq": selected_head,
         }
-        if confidence_value is not None:
-            result["confidence"] = confidence_value
         return result
 
     def predict_action(self, *args, **kwargs):
         with autocast(enabled=self.use_amp_for_inference, dtype=self.amp_dtype):
             return self._predict_action(*args, **kwargs)
-
-    def _infer_head_from_packed_tokens(
-        self,
-        packed: torch.Tensor,
-        requested_head: Optional[str],
-    ):
-        def valid_for(head: str) -> bool:
-            horizon = self.horizon_50hz if head == "50hz" else self.horizon_10hz
-            obs_dim = packed.shape[1] - horizon * self.action_dim
-            return obs_dim > 0 and obs_dim % self.n_emb == 0
-
-        if requested_head is not None and requested_head not in ("10hz", "50hz"):
-            raise ValueError(
-                f"Unsupported head={requested_head}. Expected '10hz', '50hz', or None."
-            )
-
-        if requested_head in ("10hz", "50hz"):
-            if not valid_for(requested_head):
-                raise ValueError(
-                    f"Packed trajectory shape {tuple(packed.shape)} is incompatible "
-                    f"with requested head={requested_head}."
-                )
-            return requested_head
-
-        valid_heads = [head for head in ("10hz", "50hz") if valid_for(head)]
-        if len(valid_heads) == 1:
-            return valid_heads[0]
-        if len(valid_heads) > 1:
-            raise ValueError(
-                f"Packed trajectory shape {tuple(packed.shape)} is compatible with "
-                f"multiple heads {valid_heads}; pass head explicitly."
-            )
-        raise ValueError(
-            f"Packed trajectory shape {tuple(packed.shape)} is incompatible with "
-            "both 10hz and 50hz heads."
-        )
 
     def sample_noisy_trajectory(
         self,
@@ -988,6 +979,7 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         noisy = noisy.reshape(B, -1)
         return noisy, head
 
+    #need review
     def _predict_from_obs_tokens_and_noisy_trajectory(
         self,
         obs_tokens_and_noisy_trajectory_list: List[torch.Tensor],
@@ -997,39 +989,13 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         extend_obs_pad_after: bool = False,
         head: Optional[str] = None,
     ) -> List[Dict[str, torch.Tensor]]:
-        packed = torch.cat(obs_tokens_and_noisy_trajectory_list, dim=0)
-        batch_size = packed.shape[0]
-        packed_head = self._infer_head_from_packed_tokens(packed, head)
-        packed_horizon = self.horizon_50hz if packed_head == "50hz" else self.horizon_10hz
-        obs_tokens_flat = packed[:, :-packed_horizon * self.action_dim]
-        noisy_flat = packed[:, -packed_horizon * self.action_dim:]
-        obs_tokens = obs_tokens_flat.to(self.device).reshape(batch_size, -1, self.n_emb)
-        noisy_trajectory = noisy_flat.to(self.device).reshape(
-            batch_size, packed_horizon, self.action_dim
-        )
-
-        confidence_value = None
-        if self.use_confidence_based_head_selection and self.confidence_head is not None:
-            tcp_obs_tokens = obs_tokens[:1]
-            confidence_value, _ = self._confidence_value(tcp_obs_tokens)
-            if confidence_value is None:
-                logger.warning(
-                    "Confidence returned None, falling back to inference_head=%s",
-                    self.inference_head,
-                )
-                selected_head = self.inference_head
-            else:
-                selected_head = (
-                    "50hz"
-                    if confidence_value > self.confidence_threshold_for_head_selection
-                    else "10hz"
-                )
-        else:
-            selected_head = self.inference_head
+        obs_tokens = torch.cat(obs_tokens_and_noisy_trajectory_list, dim=0)
+        batch_size = obs_tokens.shape[0]
+        obs_tokens = obs_tokens.to(self.device).reshape(batch_size, -1, self.n_emb)
+        noisy_trajectory = obs_tokens[:, -self.horizon_50hz * self.action_dim:]
+        selected_head, confidence_value = self._get_inference_head(obs_tokens)
 
         target_horizon = self.horizon_50hz if selected_head == "50hz" else self.horizon_10hz
-        if selected_head != packed_head:
-            noisy_trajectory = None
 
         steps = (
             self.num_inference_steps_50hz

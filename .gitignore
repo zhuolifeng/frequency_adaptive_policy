@@ -151,7 +151,7 @@ consistency-policy
 imeanflow/
 pMF/
 SDM-Policy/
-JiT/
+#JiT/
 DMD2/
 *.mp4
 metrics.json

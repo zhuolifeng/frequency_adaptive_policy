@@ -84,6 +84,7 @@ def main(cfg):
         eval_stage = int(configured_stage)
     policy.set_training_stage(int(eval_stage))
     logger.info(f"Evaluation training_stage={policy.training_stage}")
+    logger.info(f"Evaluation loss_type={getattr(policy, 'loss_type', 'unknown')}")
 
     num_inference_steps_10hz = int(cfg.get("num_inference_steps_10hz", 5))
     num_inference_steps_50hz = int(cfg.get("num_inference_steps_50hz", 1))
@@ -164,6 +165,13 @@ def main(cfg):
 
     all_metrics = {}
     all_confidence = {}
+    all_metrics["_config"] = {
+        "loss_type": getattr(policy, "loss_type", None),
+        "prediction_type": getattr(policy.noise_scheduler.config, "prediction_type", None),
+        "training_stage": int(policy.training_stage),
+        "num_inference_steps_10hz": num_inference_steps_10hz,
+        "num_inference_steps_50hz": num_inference_steps_50hz,
+    }
     max_episodes = min(n_episodes, cfg.get("max_episodes", n_episodes))
     for episode_idx in range(max_episodes):
         if len(episode_data[episode_idx]) == 0:

@@ -284,7 +284,15 @@ class DPMultiFreqPolicy(BaseImagePolicy):
             return self.noise_scheduler.get_velocity(trajectory, noise, timesteps)
         raise ValueError(f"Unsupported prediction_type={pred_type}")
 
-    def _sample_diffusion_batch(self, trajectory: torch.Tensor):
+    def _compute_dp_loss_one_freq(
+        self,
+        model,
+        trajectory: torch.Tensor,
+        obs_tokens: torch.Tensor,
+        temporal_cond: torch.Tensor,
+        freq_mode: str,
+        loss_mask=None,
+    ):
         B = trajectory.shape[0]
         device = trajectory.device
         noise = torch.randn_like(trajectory)
@@ -296,18 +304,6 @@ class DPMultiFreqPolicy(BaseImagePolicy):
         ).long()
         noisy = self.noise_scheduler.add_noise(trajectory, noise, timesteps)
         target = self._prediction_target(trajectory, noise, timesteps)
-        return noisy, timesteps, target
-
-    def _compute_dp_loss_one_freq(
-        self,
-        model,
-        trajectory: torch.Tensor,
-        obs_tokens: torch.Tensor,
-        temporal_cond: torch.Tensor,
-        freq_mode: str,
-        loss_mask=None,
-    ):
-        noisy, timesteps, target = self._sample_diffusion_batch(trajectory)
         pred = model(
             noisy,
             timesteps,

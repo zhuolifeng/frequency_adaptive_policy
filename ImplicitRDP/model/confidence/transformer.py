@@ -36,9 +36,6 @@ class TransformerConfidenceHead(ModuleAttrMixin):
                  obs_encoder_hidden_dim: Optional[int] = None,
                  n_heads: int = 8,
                  dropout: float = 0.1,
-                 log_sigma_min: float = -5.0,
-                 log_sigma_max: float = 5.0,
-                 clamp_log_sigma: bool = True,
                  use_learnable_pos_emb: bool = False,
                  max_obs_tokens: int = 100,
                  max_cond_tokens: int = 100,
@@ -47,9 +44,6 @@ class TransformerConfidenceHead(ModuleAttrMixin):
 
         self.n_emb = n_emb
         self.hidden_dim = hidden_dim or n_emb
-        self.log_sigma_min = log_sigma_min
-        self.log_sigma_max = log_sigma_max
-        self.clamp_log_sigma = clamp_log_sigma
         self.use_learnable_pos_emb = use_learnable_pos_emb
         self.pooling = pooling
 
@@ -142,10 +136,7 @@ class TransformerConfidenceHead(ModuleAttrMixin):
         # Head takes only obs features
         log_sigma_raw = self.head(obs_feat).squeeze(-1)
 
-        if self.clamp_log_sigma:
-            return torch.clamp(log_sigma_raw, min=self.log_sigma_min, max=self.log_sigma_max)
-        else:
-            return log_sigma_raw
+        return log_sigma_raw
 
     def get_optim_groups(self, weight_decay: float = 1e-3):
         groups = [

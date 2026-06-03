@@ -1,25 +1,26 @@
 #!/bin/bash
 
-GPU_ID="${GPU_ID:-0,1,2,3}"
+GPU_ID="${GPU_ID:-0,1,2,3,4,5,6,7}"
 
 TASK="${TASK:-dual_switch}"
-DATASET_VERSION="${DATASET_VERSION:-v4}"
+DATASET_VERSION="${DATASET_VERSION:-v6.2}"
 ROUND="${ROUND:-1}"
-DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+DATASET_PATH="${DATASET_PATH:-/mnt/workspace/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 SEED="${SEED:-42}"
 
 EXP_NAME="${EXP_NAME:-dp_multifreq_cd_50hz_confidence}"
 POLICY_TASK_NAME="${TASK}_${DATASET_VERSION}_dp_multifreq_cd_50hz_confidence"
+LOSS_TYPE="${LOSS_TYPE:-velocity}"
 
 # Stage 2 calibration dataset (optional, defaults to same as stage 1)
-STAGE2_DATASET_VERSION="${STAGE2_DATASET_VERSION:-v4.1}"
+STAGE2_DATASET_VERSION="${STAGE2_DATASET_VERSION:-v6.2}"
 STAGE2_ROUND="${STAGE2_ROUND:-1}"
-STAGE2_DATASET_PATH="${STAGE2_DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${STAGE2_DATASET_VERSION}_round_${STAGE2_ROUND}_zarr}"
+STAGE2_DATASET_PATH="${STAGE2_DATASET_PATH:-/mnt/workspace/users/lifeng/${TASK}_${STAGE2_DATASET_VERSION}_round_${STAGE2_ROUND}_zarr}"
 
-STAGE1_EPOCHS="${STAGE1_EPOCHS:-900}"
-STAGE2_EPOCHS="${STAGE2_EPOCHS:-300}"
-STAGE3_EPOCHS="${STAGE3_EPOCHS:-100}"
+STAGE1_EPOCHS="${STAGE1_EPOCHS:-5}"
+STAGE2_EPOCHS="${STAGE2_EPOCHS:-5}"
+STAGE3_EPOCHS="${STAGE3_EPOCHS:-5}"
 
 STAGE1_LR="${STAGE1_LR:-1.0e-4}"
 STAGE1_OBS_ENCODER_LR="${STAGE1_OBS_ENCODER_LR:-3.0e-5}"
@@ -54,6 +55,7 @@ echo "  Dataset (Stage 1):  ${DATASET_PATH}"
 echo "  Dataset (Stage 2):  ${STAGE2_DATASET_PATH:-same as Stage 1}"
 echo "  Stage epochs:       ${STAGE1_EPOCHS}/${STAGE2_EPOCHS}/${STAGE3_EPOCHS}"
 echo "  LR:                 ${STAGE1_LR}/${STAGE2_CONFIDENCE_LR}/${STAGE3_LR}"
+echo "  Loss type:          ${LOSS_TYPE}"
 echo "  Confidence:         samples=${CONFIDENCE_N_SAMPLES}, steps=${CONFIDENCE_NUM_INFERENCE_STEPS}"
 echo "=========================================="
 
@@ -63,6 +65,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port ${MAIN_PROC
     task.dataset_path="${DATASET_PATH}" \
     task.name="${POLICY_TASK_NAME}" \
     exp_name="${EXP_NAME}" \
+    loss_type="${LOSS_TYPE}" \
     training.seed="${SEED}" \
     training.stage1_epochs=${STAGE1_EPOCHS} \
     training.stage2_epochs=${STAGE2_EPOCHS} \

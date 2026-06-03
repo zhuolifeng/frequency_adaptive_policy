@@ -9,6 +9,7 @@ task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "default"
 prediction_type: sample
+loss_type: eps
 
 horizon: 16
 n_obs_steps: 2
@@ -80,7 +81,6 @@ policy:
   horizon: ${horizon}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
-  num_inference_steps: 5
   num_inference_steps_10hz: 2
   num_inference_steps_50hz: 2
 
@@ -98,25 +98,20 @@ policy:
   inference_head: "50hz"
 
   cd_timestep_grid: [99, 79, 59, 39, 19, 0]
-  cd_teacher_rollout_steps: 1
   cd_weight: 1.0
   dsm_weight: 1.0
   loss_10hz_weight: 1.0
+  loss_type: ${loss_type}
 
   use_confidence_head: True
-  confidence_head_type: transformer
   confidence_hidden_dim: ${n_emb}
   confidence_gamma: 1.0
   confidence_alpha: 0.2
-  confidence_log_sigma_min: -100
-  confidence_log_sigma_max: 100
-  confidence_clamp_log_sigma: False
   confidence_obs_encoder_n_layers: 2
   confidence_obs_encoder_hidden_dim: null
   confidence_transformer_n_heads: 8
   confidence_transformer_dropout: 0.1
   confidence_action_dims: 6
-  normalize_confidence_loss: False
   confidence_n_samples: 8
   confidence_num_inference_steps: 5
   confidence_threshold: 0.0
