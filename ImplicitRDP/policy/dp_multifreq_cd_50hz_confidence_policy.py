@@ -933,6 +933,8 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         obs_dict: Dict[str, torch.Tensor],
         dataset_obs_temporal_downsample_ratio: int = 1,
         extended_obs_dict: Optional[Dict[str, torch.Tensor]] = None,
+        num_inference_steps_10hz: Optional[int] = None,
+        num_inference_steps_50hz: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
         assert "past_action" not in obs_dict
         assert extended_obs_dict is not None, "extended_obs is required for RNN temporal condition"
@@ -942,10 +944,10 @@ class DPMultiFreqCD50HzConfidencePolicy(BaseImagePolicy):
         tc_10 = self.get_temporal_cond(extended_obs_dict, head="10hz", allow_partial=True, post_process=True)
         tc_50 = self.get_temporal_cond(extended_obs_dict, head="50hz", allow_partial=True, post_process=True)
         action_10hz, action_pred_10hz = self._predict_one_head(
-            obs_tokens, tc_10, "10hz", self.num_inference_steps_10hz
+            obs_tokens, tc_10, "10hz", num_inference_steps=num_inference_steps_10hz
         )
         action_50hz, action_pred_50hz = self._predict_one_head(
-            obs_tokens, tc_50, "50hz", self.num_inference_steps_50hz
+            obs_tokens, tc_50, "50hz", num_inference_steps=num_inference_steps_50hz
         )
 
         result = {

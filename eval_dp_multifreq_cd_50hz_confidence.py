@@ -228,16 +228,7 @@ def main(cfg):
                     if "confidence" in result:
                         confidence_data.append(float(result["confidence"]))
                     else:
-                        try:
-                            obs_tokens = policy._encode_obs(obs_dict)
-                            confidence_value, _ = policy._confidence_value(obs_tokens)
-                            confidence_data.append(
-                                float(confidence_value)
-                                if confidence_value is not None
-                                else float("nan")
-                            )
-                        except Exception:
-                            confidence_data.append(float("nan"))
+                        confidence_data.append(float("nan"))
 
         all_metrics[str(episode_idx)] = {
             "mse_10hz": [float(x) for x in mse_10hz_data],
