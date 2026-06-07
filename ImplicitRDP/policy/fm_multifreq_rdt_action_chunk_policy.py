@@ -557,19 +557,22 @@ class FMMultiFreqRDTActionChunkPolicy(BaseImagePolicy):
 
         if head == "50hz":
             normalizer_key = "action_stack"
-            nsample = self._predict_x0(
-                self.model,
-                noisy_trajectory,
-                torch.full(
-                    (B,),
-                    0.0,
-                    device=noisy_trajectory.device,
-                    dtype=torch.float32,
-                ),
-                obs_tokens,
-                temporal_cond,
-                "50hz",
-            )
+            if self.training_stage == 1:
+                nsample = self._solve_ode(
+                    self.model,
+                    noisy_trajectory,
+                    obs_tokens,
+                    temporal_cond,
+                    "50hz",
+                    self.num_inference_steps,
+                )
+            else:
+                nsample, _ = self._one_step_action_chunk(
+                    self.model,
+                    noisy_trajectory,
+                    obs_tokens,
+                    temporal_cond,
+                )
         else:
             normalizer_key = "action"
             nsample = self._solve_ode(
