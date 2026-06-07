@@ -47,7 +47,7 @@ def main(args=None):
     rclpy.init(args=rclpy_args)
     
 
-    base_dir = f'/home/lifeng/Desktop/frequency_adaptive_policy/data/{args.save_file_dir}'
+    base_dir = f'/home/lifeng/Desktop/frequency_adaptive_policy_flow/data/{args.save_file_dir}'
     save_path = osp.join(base_dir, args.save_file_name)
     
     transforms = RealWorldTransforms(option=cfg.task.transforms)
