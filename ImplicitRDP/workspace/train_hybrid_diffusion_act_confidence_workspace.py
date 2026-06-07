@@ -89,16 +89,34 @@ class TrainHybridDiffusionACTConfidenceWorkspace(BaseWorkspace):
         else:
             amp_dtype = None
         
-        accelerator = Accelerator(log_with='wandb')
+        log_backend = cfg.logging.get("backend", "wandb")
+        if log_backend == "tensorboard":
+            accelerator = Accelerator(
+                log_with="tensorboard",
+                project_dir=os.path.join(self.output_dir, "tb_logs"),
+            )
+        elif log_backend == "wandb":
+            accelerator = Accelerator(log_with="wandb")
+        elif log_backend in ("none", "disabled", None):
+            accelerator = Accelerator()
+        else:
+            raise ValueError(
+                f"Unsupported logging.backend={log_backend}. "
+                "Expected 'tensorboard', 'wandb', or 'none'."
+            )
         cuda_count = accelerator.num_processes
 
-        wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
-        wandb_cfg.pop('project')
-        accelerator.init_trackers(
-            project_name=cfg.logging.project,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            init_kwargs={"wandb": wandb_cfg}
-        )
+        if log_backend == "wandb":
+            wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
+            wandb_cfg.pop("project", None)
+            wandb_cfg.pop("backend", None)
+            accelerator.init_trackers(
+                project_name=cfg.logging.project,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                init_kwargs={"wandb": wandb_cfg},
+            )
+        elif log_backend == "tensorboard":
+            accelerator.init_trackers(project_name=cfg.logging.project)
 
         # resume training
         if cfg.training.resume:

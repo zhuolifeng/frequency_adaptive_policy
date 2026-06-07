@@ -677,7 +677,7 @@ class RealStableReactiveRunner:
                                 if self.use_reactive_transformer:
                                     with torch.no_grad():
                                         obs_tokens = policy.predict_obs_tokens(obs_dict)
-                                        noisy_trajectory, reactive_head = policy.sample_noisy_trajectory()
+                                        noisy_trajectory = policy.sample_noisy_trajectory()
                                     if update_tcp:
                                         tcp_obs_tokens = obs_tokens
                                         tcp_noisy_trajectory = noisy_trajectory
@@ -736,8 +736,7 @@ class RealStableReactiveRunner:
                                     obs_tokens_and_noisy_trajectory_list,
                                     extended_obs_dict_list,
                                     extended_obs_last_step_list,
-                                    dataset_obs_temporal_downsample_ratio,
-                                    head=reactive_head,
+                                    dataset_obs_temporal_downsample_ratio
                                 )
                             logger.debug(f"Policy inference time: {time.time() - slow_policy_time:.3f}s")
 

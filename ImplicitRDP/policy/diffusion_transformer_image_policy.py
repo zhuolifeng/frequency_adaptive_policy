@@ -54,6 +54,7 @@ class DiffusionTransformerImagePolicy(BaseImagePolicy):
         obs_tokens = obs_shape[-2] if len(obs_shape) == 3 else n_obs_steps
 
         all_extented_obs_keys = list(shape_meta['extended_obs'].keys()) if 'extended_obs' in shape_meta else []
+        all_extented_obs_keys.remove('right_robot_tcp_wrench_stack')
         self.extented_obs_keys = sorted(all_extented_obs_keys)
         temporal_cond_dim = sum([shape_meta['extended_obs'][extented_obs_key]['shape'][-1] for extented_obs_key in self.extented_obs_keys])
         if use_rnn_obs_encoder:

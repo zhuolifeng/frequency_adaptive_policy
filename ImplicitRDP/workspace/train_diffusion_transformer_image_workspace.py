@@ -102,7 +102,18 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
         else:
             amp_dtype = None
         
-        accelerator = Accelerator(log_with='tensorboard', project_dir=self.output_dir)
+        log_backend = cfg.logging.get("backend", "tensorboard")
+        if log_backend == "tensorboard":
+            accelerator = Accelerator(log_with="tensorboard", project_dir=self.output_dir)
+        elif log_backend == "wandb":
+            accelerator = Accelerator(log_with="wandb")
+        elif log_backend in ("none", "disabled", None):
+            accelerator = Accelerator()
+        else:
+            raise ValueError(
+                f"Unsupported logging.backend={log_backend}. "
+                "Expected 'tensorboard', 'wandb', or 'none'."
+            )
         cuda_count = accelerator.num_processes
 
         # Flatten nested config for TensorBoard (only supports int/float/str/bool)
@@ -121,10 +132,20 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
             return items
 
         flat_config = flatten_dict(OmegaConf.to_container(cfg, resolve=True))
-        accelerator.init_trackers(
-            project_name=cfg.logging.project,
-            config=flat_config,
-        )
+        if log_backend == "wandb":
+            wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
+            wandb_cfg.pop("project", None)
+            wandb_cfg.pop("backend", None)
+            accelerator.init_trackers(
+                project_name=cfg.logging.project,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                init_kwargs={"wandb": wandb_cfg},
+            )
+        elif log_backend == "tensorboard":
+            accelerator.init_trackers(
+                project_name=cfg.logging.project,
+                config=flat_config,
+            )
 
         # resume training
         if cfg.training.resume:

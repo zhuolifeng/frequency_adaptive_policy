@@ -1,11 +1,12 @@
 import threading
 import time
 import os.path as osp
+from torch._tensor import Tensor
 import numpy as np
 import torch
 import tqdm
 from loguru import logger
-from typing import Dict, Tuple, Union, Optional
+from typing import Any, Dict, Tuple, Union, Optional
 import rclpy
 import transforms3d as t3d
 import py_cli_interaction
@@ -68,15 +69,6 @@ os.sched_setaffinity(0, cores_to_bind)
 
 
 class RealStableReactiveRunner:
-    """
-    Reactive runner for policies that can switch between 10Hz and 50Hz heads.
-
-    The runner starts at 10Hz. At the beginning of each action chunk, the
-    confidence head selects the active policy head. The selected head fixes the
-    control/inference fps and chunk length for that whole chunk:
-      - 10hz: 6 inference/control steps by default
-      - 50hz: 30 inference/control steps by default
-    """
     def __init__(self,
                  output_dir: str,
                  transform_params: DictConfig,
@@ -278,26 +270,6 @@ class RealStableReactiveRunner:
         self.control_fps = self.control_fps_50hz if head == "50hz" else self.control_fps_10hz
         self.control_interval_time = 1.0 / self.control_fps
         self.inference_interval_time = self.control_interval_time
-
-    def _normalize_policy_head(self, head_result) -> str:
-        if isinstance(head_result, tuple):
-            head = head_result[0]
-        else:
-            head = head_result
-        if head not in ("10hz", "50hz"):
-            raise ValueError(f"Unsupported inference head: {head}")
-        return head
-
-    def _select_head_from_obs_tokens(self, policy, obs_tokens) -> str:
-        if hasattr(policy, "_get_inference_head"):
-            return self._normalize_policy_head(policy._get_inference_head(obs_tokens))
-        return self._normalize_policy_head(getattr(policy, "inference_head", self.current_inference_head))
-
-    def _sample_noisy_trajectory(self, policy, obs_tokens):
-        try:
-            return policy.sample_noisy_trajectory(obs_tokens=obs_tokens)
-        except TypeError:
-            return policy.sample_noisy_trajectory()
 
     def _get_action_update_interval(self, head: str, for_gripper: bool = False) -> int:
         if head == "50hz":
@@ -751,6 +723,7 @@ class RealStableReactiveRunner:
                 current_update_interval = self._get_action_update_interval(current_head)
                 loop_start_step = 0
                 next_update_step = 0
+                current_confidence_value = None
 
                 # For reactive transformer, we need to maintain the following variables
                 tcp_obs_tokens = None
@@ -823,7 +796,19 @@ class RealStableReactiveRunner:
                                 if self.use_reactive_transformer:
                                     with torch.no_grad():
                                         obs_tokens = policy.predict_obs_tokens(obs_dict)
-                                        selected_head = self._select_head_from_obs_tokens(policy, obs_tokens)
+                                        selected_head_result = policy._get_inference_head(obs_tokens)
+                                        selected_head = (
+                                            selected_head_result[0]
+                                            if isinstance(selected_head_result, tuple)
+                                            else selected_head_result
+                                        )
+                                        current_confidence_value = (
+                                            selected_head_result[1]
+                                            if isinstance(selected_head_result, tuple) and len(selected_head_result) > 1
+                                            else None
+                                        )
+                                        if selected_head not in ("10hz", "50hz"):
+                                            raise ValueError(f"Unsupported inference head: {selected_head}")
                                         self._set_runtime_head(selected_head)
                                         current_head = selected_head
                                         current_update_interval = self._get_action_update_interval(current_head)
@@ -831,7 +816,7 @@ class RealStableReactiveRunner:
                                         next_update_step = step_count + current_update_interval
                                         if hasattr(policy, "inference_head"):
                                             policy.inference_head = current_head
-                                        noisy_result = self._sample_noisy_trajectory(policy, obs_tokens)
+                                        noisy_result = policy.sample_noisy_trajectory(head=current_head)
                                         if isinstance(noisy_result, tuple):
                                             noisy_trajectory = noisy_result[0]
                                         else:
@@ -851,7 +836,14 @@ class RealStableReactiveRunner:
 
                             if self.use_reactive_transformer and not update_tcp:
                                 with torch.no_grad():
-                                    selected_head = self._select_head_from_obs_tokens(policy, tcp_obs_tokens)
+                                    selected_head_result = policy._get_inference_head(tcp_obs_tokens)
+                                    selected_head = (
+                                        selected_head_result[0]
+                                        if isinstance(selected_head_result, tuple)
+                                        else selected_head_result
+                                    )
+                                    if selected_head not in ("10hz", "50hz"):
+                                        raise ValueError(f"Unsupported inference head: {selected_head}")
                                 if selected_head != current_head:
                                     logger.warning(
                                         f"Confidence selected {selected_head} inside a {current_head} chunk; "
@@ -940,6 +932,7 @@ class RealStableReactiveRunner:
                                     extended_obs_last_step_list,
                                     dataset_obs_temporal_downsample_ratio,
                                     head=current_head,
+                                    confidence_value=current_confidence_value,
                                 )
                             logger.debug(f"Policy inference time: {time.time() - slow_policy_time:.3f}s")
 
