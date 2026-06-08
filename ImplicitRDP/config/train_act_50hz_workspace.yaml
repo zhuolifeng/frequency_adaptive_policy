@@ -10,7 +10,7 @@ shape_meta: ${task.shape_meta}
 exp_name: "default"
 
 horizon: 16
-policy_horizon_50hz: 80
+policy_horizon_50hz: 48
 action_start_50hz: 13
 n_obs_steps: 2
 n_latency_steps: 0

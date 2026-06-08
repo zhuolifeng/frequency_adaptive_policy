@@ -81,8 +81,8 @@ policy:
   horizon: ${horizon}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
-  num_inference_steps_10hz: 2
-  num_inference_steps_50hz: 2
+  num_inference_steps_10hz: 4
+  num_inference_steps_50hz: 1
 
   use_rnn_obs_encoder: True
   rnn_obs_encoder_n_layer: 1
@@ -115,7 +115,7 @@ policy:
   confidence_n_samples: 8
   confidence_num_inference_steps: 5
   confidence_threshold: 0.0
-  use_confidence_based_head_selection: True
+  use_confidence_based_head_selection: False
   confidence_threshold_for_head_selection: 3.5
 
   training_stage: 1

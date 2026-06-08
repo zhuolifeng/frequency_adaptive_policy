@@ -59,12 +59,11 @@ cv2.setNumThreads(12)
 
 # Get the total number of CPU cores
 total_cores = psutil.cpu_count()
-# Define the number of logical CPUs you want to bind to
-num_cores_to_bind = 20
-# Calculate the indices of the first logical CPUs
-# Ensure the number of cores to bind does not exceed the total number of cores
-cores_to_bind = set(range(min(num_cores_to_bind, total_cores)))
-# Set CPU affinity for the current process to the first logical CPUs
+# Bind the runner to the 19th and 20th logical CPUs (0-based CPU ids 18 and 19).
+cores_to_bind = {core_id for core_id in (18, 19) if core_id < total_cores}
+if not cores_to_bind:
+    cores_to_bind = {max(0, total_cores - 1)}
+# Set CPU affinity for the current process/thread
 os.sched_setaffinity(0, cores_to_bind)
 
 

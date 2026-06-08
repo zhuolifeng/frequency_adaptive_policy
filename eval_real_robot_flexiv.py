@@ -33,12 +33,13 @@ cv2.setNumThreads(12)
 
 # Get the total number of CPU cores
 total_cores = psutil.cpu_count()
-# Define the number of logical CPUs you want to bind to
-num_cores_to_bind = 20
-# Calculate the indices of the first logical CPUs
-# Ensure the number of cores to bind does not exceed the total number of cores
-cores_to_bind = set(range(min(num_cores_to_bind, total_cores)))
-# Set CPU affinity for the current process to the first logical CPUs
+# Bind the eval entry process to logical CPU ids 0-17.
+eval_start_core_id = 0
+eval_num_cores = 18
+cores_to_bind = set(range(eval_start_core_id, min(eval_start_core_id + eval_num_cores, total_cores)))
+if not cores_to_bind:
+    cores_to_bind = {max(0, total_cores - 1)}
+# Set CPU affinity for the current process
 os.sched_setaffinity(0, cores_to_bind)
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)

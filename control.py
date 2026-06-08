@@ -28,7 +28,7 @@ cv2.setNumThreads(12)
 # get the total number of cores
 total_cores = psutil.cpu_count()
 # assign the last 4 cores to the server
-num_cores_to_bind = 4
+num_cores_to_bind = min(4, total_cores)
 # calculate the start core
 cores_to_bind = set(range(total_cores - num_cores_to_bind, total_cores))
 # set the CPU affinity

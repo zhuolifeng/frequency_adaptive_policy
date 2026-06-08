@@ -26,10 +26,10 @@ kineteach_controller:
 
 publisher:
   robot_publisher:
-    fps: 50
+    fps: 30
     sensor_stacks:
-      right_tcp_pose: 5
-      right_tcp_wrench: 5
+      right_tcp_pose: 3
+      right_tcp_wrench: 3
   # one USB camera
   realsense_camera_publisher: null
   # one iPhone camera (Record3D)

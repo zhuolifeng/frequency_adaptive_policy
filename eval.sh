@@ -1,177 +1,59 @@
 #!/bin/bash
 
-# Box Flipping v2
-
-# DP (Box Flipping) v2
+# # ImplicitRDP 
 # python eval_real_robot_flexiv.py \
-#      --config-name train_diffusion_unet_real_image_workspace \
-#      task=real_flip_image_dp_10fps \
-#      +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_dp_10fps \
-#      ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_dp_10fps/checkpoints/latest.ckpt
-
-# RDP w. Force (Box Flipping) v2
-# python eval_real_robot_flexiv.py \
-#      --config-name train_latent_diffusion_unet_real_image_workspace \
-#      task=real_flip_image_wrench_ldp_10fps \
-#      at=at_flip \
-#      at_load_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_at_10fps/checkpoints/latest.ckpt \
-#      +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_ldp_10fps \
-#      ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_ldp_10fps/checkpoints/latest.ckpt
-
-# DPT w. Force (Box Flipping) v2
-# python eval_real_robot_flexiv.py \
-#    --config-name=train_diffusion_transformer_real_image_workspace \
+#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
 #    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_flip_image_wrench_dpt_10fps \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_dpt_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_dpt_10fps/checkpoints/latest.ckpt
-
-# DPT w. Force (Box Flipping) v2, VRR
-# python eval_real_robot_flexiv.py \
-#    --config-name=train_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_flip_image_wrench_dpt_vrr_10fps \
+#    task=real_dual_switch_image_wrench_offline_10fps  \
 #    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_dpt_vrr_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_dpt_vrr_10fps/checkpoints/latest.ckpt
+#    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
+#    ckpt_path=/home/lifeng/frequency_adaptive_policy/2026.06.06/23.53.08_train_reactive_diffusion_transformer_image_dual_switch_v7_policy_bigger_acp_round_1/checkpoints/latest.ckpt
 
-# ImplicitRDP w. Force (Box Flipping) v2
+# # DPMultiFreqCD50HzConfidencePolicy stage 1
 python eval_real_robot_flexiv.py \
-   --config-name train_reactive_diffusion_transformer_real_image_workspace \
-   policy.noise_scheduler.prediction_type=v_prediction \
-   task=real_dual_switch_image_wrench_offline_10fps  \
+   --config-name train_dp_multifreq_cd_50hz_confidence_workspace \
+   task=real_dual_switch_image_wrench_offline_10fps_50hz \
+   prediction_type=sample \
+   loss_type=velocity \
    task.env_runner.action_type=right_arm_6DOF \
    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
-   ckpt_path=/home/lifeng/Desktop/frequency_adaptive_policy/data/outputs/2026.04.27/2026.04.27/13.34.05_train_reactive_diffusion_transformer_image_dual_switch_v5.1_policy_bigger_acp_round_1/checkpoints/latest.ckpt
+   policy.training_stage=3 \
+   'ckpt_path="/home/lifeng/frequency_adaptive_policy/2026.06.06/12.38.15_train_dp_multifreq_cd_50hz_confidence_workspace_dual_switch_v7_dp_multifreq_cd_50hz_confidence/checkpoints/epoch=1100-stage3-train_loss=0.014.ckpt"'
+#   'ckpt_path="/home/lifeng/frequency_adaptive_policy/2026.06.06/12.40.48_train_dp_multifreq_cd_50hz_confidence_workspace_dual_switch_v7_dp_multifreq_cd_50hz_confidence/checkpoints/epoch=1120-stage3-train_loss=0.013.ckpt"'
 
-# ImplicitRDP w. Force (Box Flipping) v2, no auxiliary task
+# # DPMultiFreqCD50HzConfidencePolicy stage 3
 # python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_flip_image_wrench_implicitrdp_noaux_10fps \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_noaux_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_noaux_10fps/checkpoints/latest.ckpt
-
-# ImplicitRDP w. Force (Box Flipping) v2, force prediction
-# python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_flip_image_wrench_implicitrdp_fp_10fps \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_fp_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_fp_10fps/checkpoints/latest.ckpt
-
-# ImplicitRDP w. Force (Box Flipping) v2, epsilon
-# python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=epsilon \
-#    task=real_flip_image_wrench_implicitrdp_10fps \
+#    --config-name train_dp_multifreq_cd_50hz_confidence_workspace \
+#    task=real_dual_switch_image_wrench_offline_10fps_acp \
+#    prediction_type=sample \
+#    loss_type=eps \
 #    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_epsilon_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_epsilon_10fps/checkpoints/latest.ckpt
+#    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
+#    policy.training_stage=1 \
+#    ckpt_path=/home/lifeng/frequency_adaptive_policy/2026.06.06/12.40.48_train_dp_multifreq_cd_50hz_confidence_workspace_dual_switch_v7_dp_multifreq_cd_50hz_confidence/checkpoints/stage1_final.ckpt
 
-# ImplicitRDP w. Force (Box Flipping) v2, sample
+# # FMMultiFreqRDTActionChunkPolicy stage 1
 # python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=sample \
-#    task=real_flip_image_wrench_implicitrdp_10fps \
+#    --config-name train_fm_multifreq_rdt_action_chunk_workspace \
+#    task=real_dual_switch_image_wrench_offline_10fps_acp \
 #    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_sample_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_sample_10fps/checkpoints/latest.ckpt
+#    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
+#    policy.training_stage=2 \
+#    ckpt_path=/home/lifeng/Desktop/frequency_adaptive_policy_flow/2026.06.06/18.26.17_train_fm_multifreq_rdt_action_chunk_workspace_dual_switch_v7_fm_multifreq_rdt_action_chunk/checkpoints/latest.ckpt
 
-# ImplicitRDP w. Force (Box Flipping) v2, 6d rotation
+# # FMMultiFreqRDTActionChunkPolicy stage 2
 # python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_flip_image_wrench_implicitrdp_6d_10fps \
+#    --config-name train_fm_multifreq_rdt_action_chunk_workspace \
+#    task=real_dual_switch_image_wrench_offline_10fps_acp \
 #    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_6d_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_flip_image_wrench_implicitrdp_6d_10fps/checkpoints/latest.ckpt
+#    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
+#    policy.training_stage=2 \
+#    ckpt_path=null
 
-# ---------------------------------------------------
-
-# Switch Toggling v2
-
-# DP (Switch Toggling) v2
+# ACT50HzPolicy
 # python eval_real_robot_flexiv.py \
-#      --config-name train_diffusion_unet_real_image_workspace \
-#      task=real_toggle_image_dp_10fps \
-#      +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_dp_10fps \
-#      ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_dp_10fps/checkpoints/latest.ckpt
-
-# RDP w. Force (Switch Toggling) v2
-# python eval_real_robot_flexiv.py \
-#      --config-name train_latent_diffusion_unet_real_image_workspace \
-#      task=real_toggle_image_wrench_ldp_10fps \
-#      at=at_toggle \
-#      at_load_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_at_10fps/checkpoints/latest.ckpt \
-#      +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_ldp_10fps \
-#      ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_ldp_10fps/checkpoints/latest.ckpt
-
-# DPT w. Force (Switch Toggling) v2
-# python eval_real_robot_flexiv.py \
-#    --config-name=train_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_toggle_image_wrench_dpt_10fps \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_dpt_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_dpt_10fps/checkpoints/latest.ckpt
-
-# DPT w. Force (Switch Toggling) v2, VRR
-# python eval_real_robot_flexiv.py \
-#    --config-name=train_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_toggle_image_wrench_dpt_vrr_10fps \
+#    --config-name train_act_50hz_workspace \
+#    task=real_dual_switch_image_wrench_offline_10fps_50hz \
 #    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_dpt_vrr_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_dpt_vrr_10fps/checkpoints/latest.ckpt
-
-# ImplicitRDP w. Force (Switch Toggling) v2
-# python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_toggle_image_wrench_implicitrdp_10fps \
-#    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_10fps/checkpoints/latest.ckpt
-
-# ImplicitRDP w. Force (Switch Toggling) v2, no auxiliary task
-# python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_toggle_image_wrench_implicitrdp_noaux_10fps \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_noaux_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_noaux_10fps/checkpoints/latest.ckpt
-
-# ImplicitRDP w. Force (Switch Toggling) v2, force prediction
-# python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_toggle_image_wrench_implicitrdp_fp_10fps \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_fp_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_fp_10fps/checkpoints/latest.ckpt
-
-# ImplicitRDP w. Force (Switch Toggling) v2, epsilon
-# python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=epsilon \
-#    task=real_toggle_image_wrench_implicitrdp_10fps \
-#    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_epsilon_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_epsilon_10fps/checkpoints/latest.ckpt
-
-# ImplicitRDP w. Force (Switch Toggling) v2, sample
-# python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=sample \
-#    task=real_toggle_image_wrench_implicitrdp_10fps \
-#    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_sample_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_sample_10fps/checkpoints/latest.ckpt
-
-# ImplicitRDP w. Force (Switch Toggling) v2, 6d rotation
-# python eval_real_robot_flexiv.py \
-#    --config-name train_reactive_diffusion_transformer_real_image_workspace \
-#    policy.noise_scheduler.prediction_type=v_prediction \
-#    task=real_toggle_image_wrench_implicitrdp_6d_10fps \
-#    task.env_runner.action_type=right_arm_6DOF \
-#    +task.env_runner.output_dir=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_6d_10fps \
-#    ckpt_path=/home/wendi/Desktop/ImplicitRDP/data/checkpoints/real_toggle_image_wrench_implicitrdp_6d_10fps/checkpoints/latest.ckpt
+#    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
+#    ckpt_path=/home/lifeng/Desktop/frequency_adaptive_policy_flow/2026.06.06/19.22.12_train_act_50hz_workspace_dual_switch_v7_act_50hz/checkpoints/latest.ckpt

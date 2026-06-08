@@ -45,10 +45,10 @@ transforms3d
 pyinstrument
 py_cli_interaction
 pygame
-rerun-sdk
+#rerun-sdk
 pynput
 pyudev
-flexivrdk==1.7.0
+# flexivrdk==1.7.0
 # install this by yourself
 # torch==2.2.2
 # torchvision==0.17.2
