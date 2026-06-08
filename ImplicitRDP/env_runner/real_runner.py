@@ -52,12 +52,12 @@ cv2.setNumThreads(12)
 
 # Get the total number of CPU cores
 total_cores = psutil.cpu_count()
-# Define the number of cores you want to bind to
-num_cores_to_bind = 24
-# Calculate the indices of the first ten cores
+# Define the number of logical CPUs you want to bind to
+num_cores_to_bind = 20
+# Calculate the indices of the first logical CPUs
 # Ensure the number of cores to bind does not exceed the total number of cores
 cores_to_bind = set(range(min(num_cores_to_bind, total_cores)))
-# Set CPU affinity for the current process to the first ten cores
+# Set CPU affinity for the current process to the first logical CPUs
 os.sched_setaffinity(0, cores_to_bind)
 
 class RealRunner:

@@ -24,11 +24,11 @@ import cv2
 # add this to prevent assigning too many threads when using open-cv
 cv2.setNumThreads(12)
 
-# Set the CPU affinity to the last 3 cores to avoid conflict with the main process
+# Set the CPU affinity to the last 4 logical CPUs to avoid conflict with the runner/eval process.
 # get the total number of cores
 total_cores = psutil.cpu_count()
 # assign the last 4 cores to the server
-num_cores_to_bind = 8
+num_cores_to_bind = 4
 # calculate the start core
 cores_to_bind = set(range(total_cores - num_cores_to_bind, total_cores))
 # set the CPU affinity

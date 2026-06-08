@@ -59,12 +59,12 @@ cv2.setNumThreads(12)
 
 # Get the total number of CPU cores
 total_cores = psutil.cpu_count()
-# Define the number of cores you want to bind to
-num_cores_to_bind = 24
-# Calculate the indices of the first ten cores
+# Define the number of logical CPUs you want to bind to
+num_cores_to_bind = 20
+# Calculate the indices of the first logical CPUs
 # Ensure the number of cores to bind does not exceed the total number of cores
 cores_to_bind = set(range(min(num_cores_to_bind, total_cores)))
-# Set CPU affinity for the current process to the first ten cores
+# Set CPU affinity for the current process to the first logical CPUs
 os.sched_setaffinity(0, cores_to_bind)
 
 
@@ -633,11 +633,13 @@ class RealStableReactiveRunner:
                 # For reactive transformer, we need to maintain the following variables
                 tcp_obs_tokens = None
                 tcp_noisy_trajectory = None
+                tcp_obs_tokens_and_noisy_trajectory = None
                 tcp_latent_action = None
                 tcp_base_absolute_action = None
                 tcp_action = None
                 gripper_obs_tokens = None
                 gripper_noisy_trajectory = None
+                gripper_obs_tokens_and_noisy_trajectory = None
                 gripper_latent_action = None
                 gripper_base_absolute_action = None
                 gripper_action = None
@@ -652,51 +654,70 @@ class RealStableReactiveRunner:
                         # profiler = Profiler()
                         # profiler.start()
                         start_time = time.time()
-                        # get obs
-                        obs = self.env.get_obs(
-                            obs_steps=self.n_obs_steps,
-                            temporal_downsample_ratio=self.obs_temporal_downsample_ratio)
+                        use_reactive_or_latent = self.use_latent_action_with_rnn_decoder or self.use_reactive_transformer
+                        update_tcp = False
+                        update_gripper = False
+                        refresh_tcp = False
+                        refresh_gripper = False
+                        if use_reactive_or_latent:
+                            update_tcp = (step_count % self.tcp_action_update_interval == 0)
+                            update_gripper = (step_count % self.gripper_action_update_interval == 0)
+                            refresh_tcp = update_tcp
+                            refresh_gripper = update_gripper
+                            if self.use_latent_action_with_rnn_decoder:
+                                refresh_tcp = refresh_tcp or tcp_latent_action is None
+                                refresh_gripper = refresh_gripper or gripper_latent_action is None
+                            if self.use_reactive_transformer:
+                                refresh_tcp = refresh_tcp or tcp_obs_tokens_and_noisy_trajectory is None
+                                refresh_gripper = refresh_gripper or gripper_obs_tokens_and_noisy_trajectory is None
 
-                        if len(obs) == 0:
-                            logger.warning("No observation received! Skip this step.")
-                            cur_time = time.time()
-                            precise_sleep(max(0., self.inference_interval_time - (cur_time - start_time)))
-                            step_count += steps_per_inference
-                            continue
+                        need_slow_obs = (not use_reactive_or_latent) or refresh_tcp or refresh_gripper
+                        obs_dict = None
+                        base_absolute_action = None
+                        if need_slow_obs:
+                            # get obs
+                            obs = self.env.get_obs(
+                                obs_steps=self.n_obs_steps,
+                                temporal_downsample_ratio=self.obs_temporal_downsample_ratio)
 
-                        # create obs dict
-                        np_obs_dict = dict(obs)
-                        # get transformed real obs dict
-                        np_obs_dict = get_real_obs_dict(
-                            env_obs=np_obs_dict, shape_meta=self.shape_meta)
-                        np_obs_dict, np_absolute_obs_dict = self.pre_process_obs(np_obs_dict)
+                            if len(obs) == 0:
+                                logger.warning("No observation received! Skip this step.")
+                                cur_time = time.time()
+                                precise_sleep(max(0., self.inference_interval_time - (cur_time - start_time)))
+                                step_count += steps_per_inference
+                                continue
 
-                        # device transfer
-                        obs_dict = dict_apply(np_obs_dict,
-                                              lambda x: torch.from_numpy(x).unsqueeze(0).to(
-                                                  device=device))
-                        base_absolute_action = np.concatenate([
-                            np_absolute_obs_dict['left_robot_tcp_pose'][
-                                -1] if 'left_robot_tcp_pose' in np_absolute_obs_dict else np.array([]),
-                            np_absolute_obs_dict['right_robot_tcp_pose'][
-                                -1] if 'right_robot_tcp_pose' in np_absolute_obs_dict else np.array([])
-                        ], axis=-1)
+                            # create obs dict
+                            np_obs_dict = dict(obs)
+                            # get transformed real obs dict
+                            np_obs_dict = get_real_obs_dict(
+                                env_obs=np_obs_dict, shape_meta=self.shape_meta)
+                            np_obs_dict, np_absolute_obs_dict = self.pre_process_obs(np_obs_dict)
+
+                            # device transfer
+                            obs_dict = dict_apply(np_obs_dict,
+                                                  lambda x: torch.from_numpy(x).unsqueeze(0).to(
+                                                      device=device))
+                            base_absolute_action = np.concatenate([
+                                np_absolute_obs_dict['left_robot_tcp_pose'][
+                                    -1] if 'left_robot_tcp_pose' in np_absolute_obs_dict else np.array([]),
+                                np_absolute_obs_dict['right_robot_tcp_pose'][
+                                    -1] if 'right_robot_tcp_pose' in np_absolute_obs_dict else np.array([])
+                            ], axis=-1)
 
                         slow_policy_time = time.time()
                         # run policy
-                        if self.use_latent_action_with_rnn_decoder or self.use_reactive_transformer:
-                            update_tcp = (step_count % self.tcp_action_update_interval == 0)
-                            update_gripper = (step_count % self.gripper_action_update_interval == 0)
-                            if update_tcp or update_gripper:
+                        if use_reactive_or_latent:
+                            if refresh_tcp or refresh_gripper:
                                 if self.use_latent_action_with_rnn_decoder:
                                     with torch.no_grad():
                                         latent_action = policy.predict_action(obs_dict,
                                                                             dataset_obs_temporal_downsample_ratio=self.dataset_obs_temporal_downsample_ratio,
                                                                             return_latent_action=True)['action'][:, 0, :]
-                                    if update_tcp:
+                                    if refresh_tcp:
                                         tcp_latent_action = latent_action
                                         tcp_base_absolute_action = base_absolute_action
-                                    if update_gripper:
+                                    if refresh_gripper:
                                         gripper_latent_action = latent_action
                                         gripper_base_absolute_action = base_absolute_action
                                 if self.use_reactive_transformer:
@@ -711,13 +732,16 @@ class RealStableReactiveRunner:
                                             noisy_trajectory = noisy_result[0]
                                         else:
                                             noisy_trajectory = noisy_result
-                                    if update_tcp:
+                                        obs_tokens_and_noisy_trajectory = torch.cat([obs_tokens, noisy_trajectory], dim=-1)
+                                    if refresh_tcp:
                                         tcp_obs_tokens = obs_tokens
                                         tcp_noisy_trajectory = noisy_trajectory
+                                        tcp_obs_tokens_and_noisy_trajectory = obs_tokens_and_noisy_trajectory
                                         tcp_base_absolute_action = base_absolute_action
-                                    if update_gripper:
+                                    if refresh_gripper:
                                         gripper_obs_tokens = obs_tokens
                                         gripper_noisy_trajectory = noisy_trajectory
+                                        gripper_obs_tokens_and_noisy_trajectory = obs_tokens_and_noisy_trajectory
                                         gripper_base_absolute_action = base_absolute_action
                             tcp_extended_obs_last_step = self._get_extended_obs_last_step(
                                 step_count=step_count,
@@ -733,9 +757,10 @@ class RealStableReactiveRunner:
                             )
 
                             if self.use_reactive_transformer:
-                                obs_tokens_list = [tcp_obs_tokens, gripper_obs_tokens]
-                                noisy_trajectory_list = [tcp_noisy_trajectory, gripper_noisy_trajectory]
-                                obs_tokens_and_noisy_trajectory_list = [torch.cat([obs_tokens, noisy_trajectory], dim=-1) for obs_tokens, noisy_trajectory in zip(obs_tokens_list, noisy_trajectory_list)]
+                                obs_tokens_and_noisy_trajectory_list = [
+                                    tcp_obs_tokens_and_noisy_trajectory,
+                                    gripper_obs_tokens_and_noisy_trajectory,
+                                ]
                                 extended_obs_last_step_list = [tcp_extended_obs_last_step, gripper_extended_obs_last_step]
 
                             longer_extended_obs_last_step = max(tcp_extended_obs_last_step, gripper_extended_obs_last_step)
