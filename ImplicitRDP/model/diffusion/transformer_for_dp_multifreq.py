@@ -4,8 +4,8 @@ Single-stage multi-frequency transformer backbone for diffusion-policy training.
 Condition tokens are only:
     [time_emb | obs_tokens]
 
-``freq_mode`` is still used to choose 10Hz/50Hz positional indices on the shared
-50Hz grid, but it is not embedded as a condition token. The network output
+``freq_mode`` is still used to choose 10Hz/high-frequency positional indices
+on the shared high-frequency grid, but it is not embedded as a condition token. The network output
 follows the policy scheduler prediction type: sample/x0, epsilon, or
 v_prediction.
 """
@@ -42,10 +42,10 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
         obs_as_cond: bool = False,
         n_cond_layers: int = 0,
         horizon_10hz: int = 16,
-        horizon_50hz: int = 80,
-        freq_ratio: int = 5,
-        action_offset_10hz: int = 8,
-        temporal_offset_10hz: int = 4,
+        horizon_30hz: int = 48,
+        freq_ratio: int = 3,
+        action_offset_10hz: int = 4,
+        temporal_offset_10hz: int = 2,
     ) -> None:
         super().__init__()
 
@@ -61,7 +61,7 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
 
         max_action_index = action_offset_10hz + (horizon_10hz - 1) * freq_ratio
         max_temporal_index = temporal_offset_10hz + (horizon_10hz - 1) * freq_ratio
-        pos_emb_len = max(horizon_50hz, max_action_index + 1, max_temporal_index + 1)
+        pos_emb_len = max(horizon_30hz, max_action_index + 1, max_temporal_index + 1)
         self.pos_emb = nn.Parameter(torch.zeros(1, pos_emb_len, n_emb))
 
         self.time_emb = SinusoidalPosEmb(n_emb)
@@ -113,7 +113,7 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
         self.time_as_cond = time_as_cond
         self.obs_as_cond = obs_as_cond
         self.horizon_10hz = horizon_10hz
-        self.horizon_50hz = horizon_50hz
+        self.horizon_30hz = horizon_30hz
         self.freq_ratio = freq_ratio
         self.action_offset_10hz = action_offset_10hz
         self.temporal_offset_10hz = temporal_offset_10hz
@@ -179,11 +179,11 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
     def _get_action_pos_indices(
         self, T: int, freq_mode: str, device: torch.device
     ) -> torch.Tensor:
-        if freq_mode == "50hz":
-            if T > self.horizon_50hz:
+        if freq_mode == "30hz":
+            if T > self.horizon_30hz:
                 raise ValueError(
-                    f"Unsupported 50hz sequence length T={T}. "
-                    f"Expected T <= {self.horizon_50hz}."
+                    f"Unsupported 30hz sequence length T={T}. "
+                    f"Expected T <= {self.horizon_30hz}."
                 )
             return torch.arange(T, device=device)
         if freq_mode == "10hz":
@@ -193,16 +193,16 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
                     f"Expected T <= {self.horizon_10hz}."
                 )
             return self.action_offset_10hz + torch.arange(T, device=device) * self.freq_ratio
-        raise ValueError(f"Unsupported freq_mode={freq_mode}. Expected '10hz' or '50hz'.")
+        raise ValueError(f"Unsupported freq_mode={freq_mode}. Expected '10hz' or '30hz'.")
 
     def _get_temporal_pos_indices(
         self, T: int, freq_mode: str, device: torch.device
     ) -> torch.Tensor:
-        if freq_mode == "50hz":
-            if T > self.horizon_50hz:
+        if freq_mode == "30hz":
+            if T > self.horizon_30hz:
                 raise ValueError(
-                    f"Unsupported 50hz sequence length T={T}. "
-                    f"Expected T <= {self.horizon_50hz}."
+                    f"Unsupported 30hz sequence length T={T}. "
+                    f"Expected T <= {self.horizon_30hz}."
                 )
             return torch.arange(T, device=device)
         if freq_mode == "10hz":
@@ -212,7 +212,7 @@ class TransformerForDPMultiFreq(ModuleAttrMixin):
                     f"Expected T <= {self.horizon_10hz}."
                 )
             return self.temporal_offset_10hz + torch.arange(T, device=device) * self.freq_ratio
-        raise ValueError(f"Unsupported freq_mode={freq_mode}. Expected '10hz' or '50hz'.")
+        raise ValueError(f"Unsupported freq_mode={freq_mode}. Expected '10hz' or '30hz'.")
 
     @staticmethod
     def _expand_timesteps(timestep, batch_size: int, device: torch.device):

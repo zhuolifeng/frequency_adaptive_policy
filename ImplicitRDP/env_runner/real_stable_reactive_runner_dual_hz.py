@@ -14,12 +14,7 @@ from rclpy.executors import MultiThreadedExecutor
 from omegaconf import DictConfig, ListConfig
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
-from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
-from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
-from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
-from ImplicitRDP.policy.fm_multifreq_rdt_action_chunk_policy import FMMultiFreqRDTActionChunkPolicy
-from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
-from ImplicitRDP.policy.dp_multifreq_cd_50hz_confidence_policy import DPMultiFreqCD50HzConfidencePolicy
+from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFreqCD30HzConfidencePolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
 from ImplicitRDP.env.real_bimanual.real_env import RealRobotEnvironment
@@ -93,20 +88,20 @@ class RealStableReactiveRunner:
                  latency_step: int = 2,
                  gripper_latency_step: Optional[int] = None,
                  control_fps_10hz: float = 10,
-                 control_fps_50hz: float = 50,
+                 control_fps_30hz: float = 30,
                  action_update_interval_10hz: Optional[int] = None,
-                 action_update_interval_50hz: Optional[int] = None,
+                 action_update_interval_30hz: Optional[int] = None,
                  latency_step_10hz: Optional[int] = None,
-                 latency_step_50hz: Optional[int] = None,
+                 latency_step_30hz: Optional[int] = None,
                  gripper_latency_step_10hz: Optional[int] = None,
-                 gripper_latency_step_50hz: Optional[int] = None,
+                 gripper_latency_step_30hz: Optional[int] = None,
                  initial_inference_head: str = "10hz",
                  n_obs_steps: int = 2,
                  obs_temporal_downsample_ratio: int = 1,
                  dataset_obs_temporal_downsample_ratio: int = 1,
                  downsample_extended_obs: bool = False,
                  use_fast_buffer: bool = True,
-                 obs_to_control_ratio: int = 5,
+                 obs_to_control_ratio: int = 3,
                  controller_server_ip: Optional[str] = None,
                  controller_server_port: Optional[int] = None,
                  enable_video_recording: bool = False,
@@ -160,9 +155,9 @@ class RealStableReactiveRunner:
         self.tcp_rot_clip_range = tcp_rot_clip_range
         self.tqdm_interval_sec = tqdm_interval_sec
         self.control_fps_10hz = control_fps_10hz
-        self.control_fps_50hz = control_fps_50hz
+        self.control_fps_30hz = control_fps_30hz
         self.current_inference_head = initial_inference_head
-        assert self.current_inference_head in ("10hz", "50hz")
+        assert self.current_inference_head in ("10hz", "30hz")
         self.control_fps = control_fps
         self.control_interval_time = 1.0 / control_fps
         self.inference_interval_time = 1.0 / control_fps
@@ -173,32 +168,32 @@ class RealStableReactiveRunner:
             if action_update_interval_10hz is None
             else action_update_interval_10hz
         )
-        self.action_update_interval_50hz = (
+        self.action_update_interval_30hz = (
             self.action_update_interval_10hz * obs_to_control_ratio
-            if action_update_interval_50hz is None
-            else action_update_interval_50hz
+            if action_update_interval_30hz is None
+            else action_update_interval_30hz
         )
         self.gripper_action_update_interval_10hz = gripper_action_update_interval
-        self.gripper_action_update_interval_50hz = (
+        self.gripper_action_update_interval_30hz = (
             self.gripper_action_update_interval_10hz * obs_to_control_ratio
-            if action_update_interval_50hz is None
-            else action_update_interval_50hz
+            if action_update_interval_30hz is None
+            else action_update_interval_30hz
         )
         self.latency_step_10hz = latency_step if latency_step_10hz is None else latency_step_10hz
-        self.latency_step_50hz = (
+        self.latency_step_30hz = (
             self.latency_step_10hz * obs_to_control_ratio
-            if latency_step_50hz is None
-            else latency_step_50hz
+            if latency_step_30hz is None
+            else latency_step_30hz
         )
         self.gripper_latency_step_10hz = (
             self.gripper_latency_step
             if gripper_latency_step_10hz is None
             else gripper_latency_step_10hz
         )
-        self.gripper_latency_step_50hz = (
+        self.gripper_latency_step_30hz = (
             self.gripper_latency_step_10hz * obs_to_control_ratio
-            if gripper_latency_step_50hz is None
-            else gripper_latency_step_50hz
+            if gripper_latency_step_30hz is None
+            else gripper_latency_step_30hz
         )
         self.n_obs_steps = n_obs_steps
         self.obs_temporal_downsample_ratio = obs_temporal_downsample_ratio
@@ -209,9 +204,9 @@ class RealStableReactiveRunner:
         self._set_runtime_head(self.current_inference_head)
         logger.info(
             f"Dual-Hz mode: initial_head={self.current_inference_head}, "
-            f"10hz_fps={self.control_fps_10hz}, 50hz_fps={self.control_fps_50hz}, "
+            f"10hz_fps={self.control_fps_10hz}, 30hz_fps={self.control_fps_30hz}, "
             f"10hz_interval={self.action_update_interval_10hz}, "
-            f"50hz_interval={self.action_update_interval_50hz}"
+            f"30hz_interval={self.action_update_interval_30hz}"
         )
 
         self.use_latent_action_with_rnn_decoder = use_latent_action_with_rnn_decoder
@@ -264,18 +259,18 @@ class RealStableReactiveRunner:
         executor.spin()
 
     def _set_runtime_head(self, head: str):
-        assert head in ("10hz", "50hz")
+        assert head in ("10hz", "30hz")
         self.current_inference_head = head
-        self.control_fps = self.control_fps_50hz if head == "50hz" else self.control_fps_10hz
+        self.control_fps = self.control_fps_30hz if head == "30hz" else self.control_fps_10hz
         self.control_interval_time = 1.0 / self.control_fps
         self.inference_interval_time = self.control_interval_time
 
     def _get_action_update_interval(self, head: str, for_gripper: bool = False) -> int:
-        if head == "50hz":
+        if head == "30hz":
             return (
-                self.gripper_action_update_interval_50hz
+                self.gripper_action_update_interval_30hz
                 if for_gripper
-                else self.action_update_interval_50hz
+                else self.action_update_interval_30hz
             )
         return (
             self.gripper_action_update_interval_10hz
@@ -284,14 +279,14 @@ class RealStableReactiveRunner:
         )
 
     def _get_latency_step(self, head: str, for_gripper: bool = False) -> int:
-        if head == "50hz":
-            return self.gripper_latency_step_50hz if for_gripper else self.latency_step_50hz
+        if head == "30hz":
+            return self.gripper_latency_step_30hz if for_gripper else self.latency_step_30hz
         return self.gripper_latency_step_10hz if for_gripper else self.latency_step_10hz
 
     def _get_base_extended_obs_last_step(self, policy=None, head: Optional[str] = None) -> int:
         head = head or self.current_inference_head
-        if policy is not None and head == "50hz" and hasattr(policy, "action_start_50hz"):
-            return int(policy.action_start_50hz) + 1
+        if policy is not None and head == "30hz" and hasattr(policy, "action_start_30hz"):
+            return int(policy.action_start_30hz) + 1
         if policy is not None and head == "10hz" and hasattr(policy, "action_start_10hz"):
             return int(policy.action_start_10hz) + 1
         return self.n_obs_steps * self.dataset_obs_temporal_downsample_ratio
@@ -309,7 +304,7 @@ class RealStableReactiveRunner:
         return 1
 
     def _use_fast_buffer_for_head(self, head: str) -> bool:
-        return self.use_fast_buffer and head == "50hz"
+        return self.use_fast_buffer and head == "30hz"
 
     def _get_extended_obs_downsample_ratio(self, head: Optional[str] = None) -> int:
         head = head or self.current_inference_head
@@ -644,7 +639,7 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy, FMMultiFreqRDTActionChunkPolicy, DPCTMMultiFreqPolicy, DPMultiFreqCD50HzConfidencePolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, DPMultiFreqCD30HzConfidencePolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:
@@ -806,7 +801,7 @@ class RealStableReactiveRunner:
                                             if isinstance(selected_head_result, tuple) and len(selected_head_result) > 1
                                             else None
                                         )
-                                        if selected_head not in ("10hz", "50hz"):
+                                        if selected_head not in ("10hz", "30hz"):
                                             raise ValueError(f"Unsupported inference head: {selected_head}")
                                         self._set_runtime_head(selected_head)
                                         current_head = selected_head
@@ -841,7 +836,7 @@ class RealStableReactiveRunner:
                                         if isinstance(selected_head_result, tuple)
                                         else selected_head_result
                                     )
-                                    if selected_head not in ("10hz", "50hz"):
+                                    if selected_head not in ("10hz", "30hz"):
                                         raise ValueError(f"Unsupported inference head: {selected_head}")
                                 if selected_head != current_head:
                                     logger.warning(
@@ -949,9 +944,6 @@ class RealStableReactiveRunner:
                                 tcp_action = relative_actions_to_absolute_actions(tcp_action, tcp_base_absolute_action)
                                 gripper_action = relative_actions_to_absolute_actions(gripper_action, gripper_base_absolute_action)
 
-                            # Still take the last action — the model predicts at 50Hz granularity,
-                            # action[-1] is the action for the current moment.
-                            # At 10Hz control, this action is held for 100ms instead of 20ms.
                             tcp_action = tcp_action[-1:, :]
                             self.tcp_ensemble_buffer.add_action(tcp_action, step_count)
 

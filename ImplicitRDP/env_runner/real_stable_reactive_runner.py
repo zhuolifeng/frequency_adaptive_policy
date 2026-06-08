@@ -13,12 +13,7 @@ from rclpy.executors import MultiThreadedExecutor
 from omegaconf import DictConfig, ListConfig
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
-from ImplicitRDP.policy.fm_policy import FlowMatchingTransformerImagePolicy
-from ImplicitRDP.policy.fm_multifreq_policy import FMMultiFreqPolicy
-from ImplicitRDP.policy.fm_multifreq_confidence_policy import FMMultiFreqConfidencePolicy
-from ImplicitRDP.policy.fm_multifreq_rdt_action_chunk_policy import FMMultiFreqRDTActionChunkPolicy
-from ImplicitRDP.policy.dp_ctm_multifreq_policy import DPCTMMultiFreqPolicy
-from ImplicitRDP.policy.dp_multifreq_cd_50hz_confidence_policy import DPMultiFreqCD50HzConfidencePolicy
+from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFreqCD30HzConfidencePolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
 from ImplicitRDP.env.real_bimanual.real_env import RealRobotEnvironment
@@ -60,7 +55,9 @@ cv2.setNumThreads(12)
 # Get the total number of CPU cores
 total_cores = psutil.cpu_count()
 # Bind the runner to the 19th and 20th logical CPUs (0-based CPU ids 18 and 19).
-cores_to_bind = {core_id for core_id in (18, 19) if core_id < total_cores}
+runner_start_core_id = 18
+runner_num_cores = 2
+cores_to_bind = set(range(runner_start_core_id, min(runner_start_core_id + runner_num_cores, total_cores)))
 if not cores_to_bind:
     cores_to_bind = {max(0, total_cores - 1)}
 # Set CPU affinity for the current process/thread
@@ -532,7 +529,7 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, FlowMatchingTransformerImagePolicy, FMMultiFreqPolicy, FMMultiFreqConfidencePolicy, FMMultiFreqRDTActionChunkPolicy, DPCTMMultiFreqPolicy, DPMultiFreqCD50HzConfidencePolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, ACT30HzPolicy, DPMultiFreqCD30HzConfidencePolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:

@@ -420,8 +420,8 @@ class ReplayBuffer:
         sensor_stacks = dict()
         for key in stacks_to_flatten:
             if key == "action_stack":
-                sensor_stacks["action_50hz"] = self.data["action_stack"].shape[1]
-                self.data["action_50hz"] = self.data["action_stack"].reshape(-1, self.data["action_stack"].shape[2])
+                sensor_stacks["action_30hz"] = self.data["action_stack"].shape[1]
+                self.data["action_30hz"] = self.data["action_stack"].reshape(-1, self.data["action_stack"].shape[2])
                 del self.data["action_stack"]
             else:
                 sensor_stacks[key] = self.data[key].shape[1]

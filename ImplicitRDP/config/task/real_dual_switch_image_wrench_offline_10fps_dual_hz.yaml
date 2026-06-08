@@ -84,9 +84,9 @@ env_runner:
   gripper_latency_step: 2
   initial_inference_head: "10hz"
   control_fps_10hz: 10
-  control_fps_50hz: 50
+  control_fps_30hz: 30
   action_update_interval_10hz: 6
-  action_update_interval_50hz: 30
+  action_update_interval_30hz: 18
   obs_to_control_ratio: 5
   control_fps: 10
   n_obs_steps: ${n_obs_steps}

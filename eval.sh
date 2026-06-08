@@ -11,14 +11,15 @@
 
 # # DPMultiFreqCD50HzConfidencePolicy stage 1
 python eval_real_robot_flexiv.py \
-   --config-name train_dp_multifreq_cd_50hz_confidence_workspace \
-   task=real_dual_switch_image_wrench_offline_10fps_50hz \
+   --config-name train_dp_multifreq_cd_30hz_confidence_workspace \
+   task=real_dual_switch_image_wrench_offline_10fps_30hz \
    prediction_type=sample \
    loss_type=velocity \
    task.env_runner.action_type=right_arm_6DOF \
    +task.env_runner.output_dir=./data/checkpoints/real_dual_switch_iphone_usb_camera_30_10fps \
    policy.training_stage=3 \
-   'ckpt_path="/home/lifeng/frequency_adaptive_policy/2026.06.06/12.38.15_train_dp_multifreq_cd_50hz_confidence_workspace_dual_switch_v7_dp_multifreq_cd_50hz_confidence/checkpoints/epoch=1100-stage3-train_loss=0.014.ckpt"'
+   'ckpt_path="/home/lifeng/frequency_adaptive_policy/converted_checkpoints/30hz_from_50hz_pos_emb_interp/epoch=1100-stage3-train_loss=0.014_30hz_pos_emb_interp.ckpt"'
+   # 'ckpt_path="/home/lifeng/frequency_adaptive_policy/2026.06.06/12.38.15_train_dp_multifreq_cd_50hz_confidence_workspace_dual_switch_v7_dp_multifreq_cd_50hz_confidence/checkpoints/epoch=1100-stage3-train_loss=0.014.ckpt"'
 #   'ckpt_path="/home/lifeng/frequency_adaptive_policy/2026.06.06/12.40.48_train_dp_multifreq_cd_50hz_confidence_workspace_dual_switch_v7_dp_multifreq_cd_50hz_confidence/checkpoints/epoch=1120-stage3-train_loss=0.013.ckpt"'
 
 # # DPMultiFreqCD50HzConfidencePolicy stage 3

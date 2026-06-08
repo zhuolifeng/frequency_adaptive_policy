@@ -350,7 +350,7 @@ class RealImageTactileDataset(BaseImageDataset):
                 del data[key]
 
         action = data['action'][:, :self.shape_meta['action']['shape'][0]].astype(np.float32)
-        action_stack = data['action_50hz'][:, :self.shape_meta['action_stack']['shape'][0]].astype(np.float32)
+        action_stack = data['action_30hz'][:, :self.shape_meta['action_stack']['shape'][0]].astype(np.float32)
         # handle latency by dropping first n_latency_steps action
         # observations are already taken care of by T_slice
         if self.n_latency_steps > 0:
