@@ -520,7 +520,7 @@ class RealStableReactiveRunner:
 
             # Send action to the robot using ActionType
             print(f"Executing action at step {self.action_step_count}: {step_action}")
-            #self.env.execute_action(step_action, self.action_type, use_relative_action=False)
+            self.env.execute_action(step_action, self.action_type, use_relative_action=False)
 
             cur_time = time.time()
             precise_sleep(max(0., self.control_interval_time - (cur_time - start_time)))

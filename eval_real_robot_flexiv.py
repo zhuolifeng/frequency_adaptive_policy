@@ -108,6 +108,19 @@ def main(cfg):
             f"use_confidence={policy.use_confidence_based_head_selection}, "
             f"threshold={policy.confidence_threshold_for_head_selection}"
         )
+    elif isinstance(policy, ACT30HzPolicy):
+        # ACT 30Hz policy
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        logger.info(
+            f"ACT30HzPolicy: horizon={getattr(policy, 'horizon', None)}, "
+            f"action_start_30hz={getattr(policy, 'action_start_30hz', None)}, "
+            f"n_action_steps={getattr(policy, 'n_action_steps', None)}"
+        )
+
     elif 'transformer' in cfg.name:
         # diffusion transformer model
         policy: DiffusionTransformerImagePolicy

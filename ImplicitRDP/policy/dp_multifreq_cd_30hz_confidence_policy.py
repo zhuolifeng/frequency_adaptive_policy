@@ -898,6 +898,11 @@ class DPMultiFreqCD30HzConfidencePolicy(BaseImagePolicy):
 
         confidence_value = self._compute_confidence_logits(obs_tokens)
         confidence_score = confidence_value.mean()
+        logger.info(
+            "confidence_value={}, confidence_score={:.6f}",
+            confidence_value.detach().cpu().numpy(),
+            confidence_score.item(),
+        )
 
         selected = "30hz" if confidence_score > self.confidence_threshold_for_head_selection else "10hz"
         return selected, confidence_score.item()
