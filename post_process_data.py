@@ -98,8 +98,8 @@ if __name__ == '__main__':
     DRAW_FORCE = False  # for debugging force
     USE_ABSOLUTE_ACTION = True
 
-    data_dir = f'/home/lifeng/frequency_adaptive_policy/data/{TAG}'
-    save_data_dir = f'/home/lifeng/frequency_adaptive_policy/data/{TAG}'
+    data_dir = f'/mnt/workspace/users/lifeng/{TAG}'
+    save_data_dir = f'/mnt/workspace/users/lifeng/{TAG}'
     STIFFNESS_COMPENSATION=False
     if STIFFNESS_COMPENSATION:
         save_data_dir += '_sc'
