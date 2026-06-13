@@ -1,11 +1,11 @@
 #!/bin/bash
 
-GPU_ID="${GPU_ID:-0}"
+GPU_ID="${GPU_ID:-0,1,2,3}"
 TASK="${TASK:-dual_switch}"
 DATASET_VERSION="${DATASET_VERSION:-v8}"
 ROUND="${ROUND:-1}"
 TASK_CONFIG="${TASK_CONFIG:-real_${TASK}_image_wrench_offline_10fps_30hz}"
-DATASET_PATH="${DATASET_PATH:-/home/lifeng/frequency_adaptive_policy/data/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
 POLICY_TASK_NAME="${POLICY_TASK_NAME:-${TASK}_${DATASET_VERSION}_act_30hz}"
 USE_AMP_FOR_POLICY="${USE_AMP_FOR_POLICY:-False}"

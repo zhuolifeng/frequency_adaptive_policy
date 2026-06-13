@@ -1,20 +1,20 @@
 #!/bin/bash
 
-TASK="${TASK:-dual_switch}"
-DATASET_VERSION="${DATASET_VERSION:-v6.2}"
+TASK="${TASK:-dual_button}"
+DATASET_VERSION="${DATASET_VERSION:-v1.1}"
 ROUND="${ROUND:-1}"
 
 CONFIG_NAME="${CONFIG_NAME:-train_dp_multifreq_cd_30hz_confidence_workspace}"
-CKPT_PATH="${CKPT_PATH:-}"
-DATASET_PATH="${DATASET_PATH:-/mnt/workspace/users/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+CKPT_PATH="${CKPT_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/right/frequency_adaptive_policy/data/outputs/2026.06.11/08.45.45_train_dp_multifreq_cd_30hz_confidence_workspace_dual_button_v1_dp_multifreq_cd_30hz_confidence/checkpoints/stage2_final.ckpt}"
+DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
 GPU_DEVICE="${GPU_DEVICE:-cuda:0}"
 VIDEO_FPS="${VIDEO_FPS:-1}"
 NUM_INFERENCE_STEPS_10HZ="${NUM_INFERENCE_STEPS_10HZ:-3}"
-NUM_INFERENCE_STEPS_30HZ="${NUM_INFERENCE_STEPS_30HZ:-1}"
+NUM_INFERENCE_STEPS_30HZ="${NUM_INFERENCE_STEPS_30HZ:-3}"
 PREDICTION_TYPE="${PREDICTION_TYPE:-sample}"
-LOSS_TYPE="${LOSS_TYPE:-sample}"
-TRAINING_STAGE="${TRAINING_STAGE:-3}"
+LOSS_TYPE="${LOSS_TYPE:-eps}"
+TRAINING_STAGE="${TRAINING_STAGE:-2}"
 CONFIDENCE_SELECTION="${CONFIDENCE_SELECTION:-True}"
 CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-3.5}"
 OUTPUT_DIR="${OUTPUT_DIR:-evaluations_dp_multifreq_cd_30hz_confidence/10hz_${NUM_INFERENCE_STEPS_10HZ}steps_30hz_${NUM_INFERENCE_STEPS_30HZ}steps_${TRAINING_STAGE}stage}"

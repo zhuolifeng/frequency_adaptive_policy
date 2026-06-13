@@ -118,16 +118,50 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        accelerator = Accelerator(log_with='wandb')
+        log_backend = cfg.logging.get("backend", "wandb")
+        if log_backend == "tensorboard":
+            accelerator = Accelerator(log_with="tensorboard", project_dir=self.output_dir)
+        elif log_backend == "wandb":
+            accelerator = Accelerator(log_with="wandb")
+        elif log_backend in ("none", "disabled", None):
+            accelerator = Accelerator()
+        else:
+            raise ValueError(
+                f"Unsupported logging.backend={log_backend}. "
+                "Expected 'tensorboard', 'wandb', or 'none'."
+            )
         cuda_count = accelerator.num_processes
-        
-        wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
-        wandb_cfg.pop('project')
-        accelerator.init_trackers(
-            project_name=cfg.logging.project,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            init_kwargs={"wandb": wandb_cfg}
-        )
+
+        # Flatten nested config for TensorBoard (only supports int/float/str/bool)
+        def flatten_dict(d, parent_key='', sep='/'):
+            items = {}
+            for k, v in d.items():
+                new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                if isinstance(v, dict):
+                    items.update(flatten_dict(v, new_key, sep=sep))
+                elif isinstance(v, (list, tuple)):
+                    items[new_key] = str(v)
+                elif isinstance(v, (int, float, str, bool)) or v is None:
+                    items[new_key] = str(v) if v is None else v
+                else:
+                    items[new_key] = str(v)
+            return items
+
+        if log_backend == "wandb":
+            wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
+            wandb_cfg.pop("project", None)
+            wandb_cfg.pop("backend", None)
+            accelerator.init_trackers(
+                project_name=cfg.logging.project,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                init_kwargs={"wandb": wandb_cfg},
+            )
+        elif log_backend == "tensorboard":
+            flat_config = flatten_dict(OmegaConf.to_container(cfg, resolve=True))
+            accelerator.init_trackers(
+                project_name=cfg.logging.project,
+                config=flat_config,
+            )
 
         # resume training
         if cfg.training.resume:

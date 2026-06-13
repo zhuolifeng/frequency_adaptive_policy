@@ -85,6 +85,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
+  backend: wandb
   project: at
   resume: False
   mode: online

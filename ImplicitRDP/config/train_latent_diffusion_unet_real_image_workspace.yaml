@@ -236,6 +236,7 @@ training:
   encoder_lr_coefficient: 0.1
 
 logging:
+  backend: wandb
   project: latent_diffusion_policy_tactile
   resume: False
   mode: online

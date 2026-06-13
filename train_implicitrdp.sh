@@ -2,29 +2,29 @@
 
 #--------------------------------
 # Config
-GPU_ID=0
+GPU_ID=0,1,2,3
 
-TASK="dual_switch"
-DATASET_VERSION="v8"
+TASK="dual_box"
+DATASET_VERSION="v1"
 ROUND=1
 # ACTION_TYPE="right_arm_6DOF" # No Auxiliary Task
 # ACTION_TYPE="right_arm_6DOF_wrench" # FP
 ACTION_TYPE="right_arm_6DOF_virtual_target_stiffness" # VRR
 DATASET_TAG="${TASK}_${DATASET_VERSION}_round_${ROUND}"
-DATASET_PATH="/home/lifeng/frequency_adaptive_policy/data/${DATASET_TAG}_zarr"
+DATASET_PATH="/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${DATASET_TAG}_zarr"
 TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_acp"
 
 USE_AMP_FOR_POLICY=False
 AMP_DTYPE_FOR_POLICY="bf16"
 TRAINING_DEBUG=False
 POLICY_LR=1.0e-4
-LOGGING_BACKEND="${LOGGING_BACKEND:-wandb}"
+LOGGING_BACKEND="${LOGGING_BACKEND:-tensorboard}"
 LOGGING_MODE="${LOGGING_MODE:-online}"
 #--------------------------------
 
 # Stage 0: Post-process data
 echo "Stage 0: post-processing data..."
-python post_process_data.py --tag ${DATASET_TAG} --action_type ${ACTION_TYPE} --skip_static_frames
+#python post_process_data.py --tag ${DATASET_TAG} --action_type ${ACTION_TYPE} --skip_static_frames
 
 # Stage 1: Train Policy
 echo "Stage 1: training Policy..."

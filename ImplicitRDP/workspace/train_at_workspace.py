@@ -18,6 +18,7 @@ import random
 import wandb
 import tqdm
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 
 from ImplicitRDP.common.pytorch_util import dict_apply, optimizer_to
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
@@ -89,16 +90,42 @@ class TrainATWorkspace(BaseWorkspace):
         )
 
         # configure logging
-        wandb_run = wandb.init(
-            dir=str(self.output_dir),
-            config=OmegaConf.to_container(cfg, resolve=True),
-            **cfg.logging
-        )
-        wandb.config.update(
-            {
-                "output_dir": self.output_dir,
-            }
-        )
+        log_backend = cfg.logging.get("backend", "wandb")
+        wandb_run = None
+        tb_writer = None
+        if log_backend == "wandb":
+            logging_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
+            logging_cfg.pop("backend", None)
+            wandb_run = wandb.init(
+                dir=str(self.output_dir),
+                config=OmegaConf.to_container(cfg, resolve=True),
+                **logging_cfg
+            )
+            wandb.config.update(
+                {
+                    "output_dir": self.output_dir,
+                }
+            )
+        elif log_backend == "tensorboard":
+            tb_writer = SummaryWriter(log_dir=os.path.join(self.output_dir, "tb"))
+        elif log_backend not in ("none", "disabled", None):
+            raise ValueError(
+                f"Unsupported logging.backend={log_backend}. "
+                "Expected 'tensorboard', 'wandb', or 'none'."
+            )
+
+        def log_metrics(metrics, step):
+            if wandb_run is not None:
+                wandb_run.log(metrics, step=step)
+            if tb_writer is not None:
+                for k, v in metrics.items():
+                    if isinstance(v, (int, float)) or (
+                        hasattr(v, "item") and v.ndim == 0 if hasattr(v, "ndim") else False
+                    ):
+                        try:
+                            tb_writer.add_scalar(k, float(v), step)
+                        except (TypeError, ValueError):
+                            pass
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
@@ -184,7 +211,7 @@ class TrainATWorkspace(BaseWorkspace):
                         is_last_batch = (batch_idx == (len(train_dataloader) - 1))
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
-                            wandb_run.log(step_log, step=self.global_step)
+                            log_metrics(step_log, self.global_step)
                             json_logger.log(step_log)
                             self.global_step += 1
 
@@ -274,7 +301,7 @@ class TrainATWorkspace(BaseWorkspace):
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
-                wandb_run.log(step_log, step=self.global_step)
+                log_metrics(step_log, self.global_step)
                 json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
