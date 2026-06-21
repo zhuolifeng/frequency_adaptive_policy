@@ -1,0 +1,200 @@
+defaults:
+  - task: real_dual_button_image_wrench_offline_10fps_30hz
+  - _self_
+
+name: train_dp_30hz_consistency_workspace
+_target_: ImplicitRDP.workspace.train_dp_30hz_consistency_workspace.TrainDP30HzConsistencyWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: default
+prediction_type: sample
+loss_type: eps
+
+horizon: 16
+policy_horizon_30hz: 48
+action_start_30hz: 7
+n_obs_steps: 2
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+n_action_steps: 15
+n_action_steps_30hz: 41
+n_emb: 768
+
+consistency:
+  sigma_data: 0.5
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  num_scales: 40
+  weight_schedule: karras
+  consistency_weight: 1.0
+  num_inference_steps: 1
+
+policy:
+  _target_: ImplicitRDP.policy.dp_30hz_consistency_policy.DP30HzConsistencyPolicy
+  shape_meta: ${task.model_shape_meta}
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
+    prediction_type: ${prediction_type}
+  obs_encoder:
+    _target_: ImplicitRDP.model.vision.transformer_obs_encoder.TransformerObsEncoder
+    shape_meta: ${task.model_shape_meta}
+    obs_horizon: ${n_obs_steps}
+    global_pool: ''
+    n_emb: ${n_emb}
+    model_name: resnet34
+    pretrained: False
+    frozen: False
+    feature_aggregation: null
+    downsample_ratio: 32
+    transforms:
+      - type: CenterCrop
+      - _target_: torchvision.transforms.RandomRotation
+        degrees:
+          - -5.0
+          - 5.0
+        expand: false
+      - _target_: torchvision.transforms.ColorJitter
+        brightness: 0.3
+        contrast: 0.4
+        saturation: 0.5
+        hue: 0.08
+    use_group_norm: True
+    share_rgb_model: False
+  model:
+    _target_: ImplicitRDP.model.diffusion.transformer_for_dp_30hz.TransformerForDP30Hz
+    shape_meta: ${task.model_shape_meta}
+    n_obs_steps: ${n_obs_steps}
+    cond_dim: ${n_emb}
+    n_layer: 7
+    n_head: 4
+    n_emb: ${n_emb}
+    max_cond_tokens: 900
+    p_drop_emb: 0.0
+    p_drop_attn: 0.1
+    time_as_cond: True
+    obs_as_cond: True
+    n_cond_layers: 0
+    horizon_30hz: ${policy_horizon_30hz}
+    action_key: action_stack
+    out_dim_multiplier: 1
+  n_emb: ${n_emb}
+  horizon: ${policy_horizon_30hz}
+  n_action_steps: ${n_action_steps_30hz}
+  n_obs_steps: ${n_obs_steps}
+  use_rnn_obs_encoder: True
+  rnn_obs_encoder_n_layer: 1
+  rnn_obs_encoder_hidden_dim: 512
+  highfreq_extended_obs_key: right_robot_tcp_wrench_stack
+  action_start_30hz: ${action_start_30hz}
+  action_normalizer_key: action_stack
+  action_train_key: action_stack
+  num_inference_steps: ${consistency.num_inference_steps}
+  loss_type: ${loss_type}
+  sigma_data: ${consistency.sigma_data}
+  sigma_min: ${consistency.sigma_min}
+  sigma_max: ${consistency.sigma_max}
+  rho: ${consistency.rho}
+  num_scales: ${consistency.num_scales}
+  weight_schedule: ${consistency.weight_schedule}
+  consistency_weight: ${consistency.consistency_weight}
+  training_stage: 1
+  use_amp_for_inference: False
+  amp_dtype: bf16
+
+ckpt_path: null
+
+ema:
+  _target_: ImplicitRDP.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+optimizer:
+  stage1_lr: 1.0e-4
+  stage1_obs_encoder_lr: 3.0e-5
+  stage2_lr: 1.0e-5
+  weight_decay: 1.0e-6
+  obs_encoder_weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+
+training:
+  device: cuda:0
+  seed: 42
+  debug: False
+  resume: False
+  pretrained_ckpt_path: null
+  use_amp: False
+  amp_dtype: bf16
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  stage1_epochs: 600
+  stage2_epochs: 100
+  num_epochs: 700
+  gradient_accumulate_every: 1
+  max_grad_norm: 1.0
+  use_ema: True
+  checkpoint_every: 10
+  val_every: 1
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  backend: tensorboard
+  project: dp_30hz_consistency_policy
+  resume: False
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags:
+    - ${name}
+    - ${task_name}
+    - ${exp_name}
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
