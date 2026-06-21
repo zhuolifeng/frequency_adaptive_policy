@@ -713,9 +713,6 @@ class DPMultiFreqCD30HzConfidencePolicy(BaseImagePolicy):
         if teacher_policy is None:
             teacher_policy = self
         obs_tokens, nactions_10, nactions_30, tc_10, tc_30 = self._prepare_multifreq_inputs(batch)
-        loss_10 = self._compute_dp_loss_one_freq(
-            nactions_10, obs_tokens, tc_10, "10hz", loss_mask
-        )
 
         batch_size = nactions_30.shape[0]
         device = nactions_30.device
@@ -760,8 +757,6 @@ class DPMultiFreqCD30HzConfidencePolicy(BaseImagePolicy):
             "cd_t_mean": t.float().mean().item(),
             "cd_u_mean": u.float().mean().item(),
             "cd_teacher_rollout_steps": float(self.cd_teacher_rollout_steps),
-            "dp_loss_10hz": loss_10.item(),
-            "weighted_dp_loss_10hz": (self.loss_10hz_weight * loss_10).item(),
             "training_stage": 3.0,
         }
         if self.dsm_weight > 0:
@@ -773,7 +768,7 @@ class DPMultiFreqCD30HzConfidencePolicy(BaseImagePolicy):
                 self.dsm_weight * dsm_loss
             ).item()
 
-        total = train_cd_loss + self.loss_10hz_weight * loss_10
+        total = train_cd_loss
         loss_dict["total_loss"] = total.item()
         return total, loss_dict
 

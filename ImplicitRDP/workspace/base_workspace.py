@@ -34,6 +34,10 @@ class BaseWorkspace:
             exclude_keys=None,
             include_keys=None,
             use_thread=True):
+        if self._saving_thread is not None:
+            self._saving_thread.join()
+            self._saving_thread = None
+
         if path is None:
             path = pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
         else:

@@ -2,6 +2,7 @@
 Modified from VQ-BeT https://github.com/jayLEE0301/vq_bet_official
 Some code is adapted from Stable Diffusion https://github.com/CompVis/stable-diffusion
 """
+import dill
 import torch.nn
 import einops
 from ImplicitRDP.model.common.normalizer import LinearNormalizer
@@ -264,9 +265,14 @@ class VAE:
 
         if load_dir is not None:
             try:
-                state_dict = torch.load(load_dir)
+                state_dict = torch.load(load_dir, pickle_module=dill, weights_only=False)
             except RuntimeError:
-                state_dict = torch.load(load_dir, map_location=torch.device("cpu"))
+                state_dict = torch.load(
+                    load_dir,
+                    map_location=torch.device("cpu"),
+                    pickle_module=dill,
+                    weights_only=False,
+                )
             self.load_state_dict(state_dict)
 
         if self.use_vq:

@@ -20,6 +20,7 @@ import tqdm
 import numpy as np
 import shutil
 import pickle
+import contextlib
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.dataset.base_dataset import BaseImageDataset
@@ -29,9 +30,13 @@ from ImplicitRDP.common.pytorch_util import dict_apply, optimizer_to
 from ImplicitRDP.model.diffusion.ema_model import EMAModel
 from ImplicitRDP.model.common.lr_scheduler import get_scheduler
 from ImplicitRDP.model.common.lr_decay import param_groups_lrd
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+class _NoOpJsonLogger:
+    def log(self, data):
+        pass
 
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
@@ -119,12 +124,20 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         cfg = copy.deepcopy(self.cfg)
 
         log_backend = cfg.logging.get("backend", "wandb")
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         if log_backend == "tensorboard":
-            accelerator = Accelerator(log_with="tensorboard", project_dir=self.output_dir)
+            accelerator = Accelerator(
+                log_with="tensorboard",
+                project_dir=self.output_dir,
+                kwargs_handlers=[ddp_kwargs],
+            )
         elif log_backend == "wandb":
-            accelerator = Accelerator(log_with="wandb")
+            accelerator = Accelerator(
+                log_with="wandb",
+                kwargs_handlers=[ddp_kwargs],
+            )
         elif log_backend in ("none", "disabled", None):
-            accelerator = Accelerator()
+            accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
         else:
             raise ValueError(
                 f"Unsupported logging.backend={log_backend}. "
@@ -177,15 +190,15 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         
         dataloader_cfg = OmegaConf.to_container(cfg.dataloader, resolve=True)
         val_dataloader_cfg = OmegaConf.to_container(cfg.val_dataloader, resolve=True)
-        print("###########################################")
-        print(f"Number of available CUDA devices: {cuda_count}.")
-        print(f"Original training batch size: {dataloader_cfg['batch_size']}.")
-        print(f"Original validation batch size: {val_dataloader_cfg['batch_size']}.")
-        dataloader_cfg['batch_size'] = dataloader_cfg['batch_size'] // cuda_count
-        val_dataloader_cfg['batch_size'] = val_dataloader_cfg['batch_size'] // cuda_count
-        print(f"Updated training batch size: {dataloader_cfg['batch_size']}")
-        print(f"Updated validation batch size: {val_dataloader_cfg['batch_size']}")
-        print("###########################################")
+        accelerator.print("###########################################")
+        accelerator.print(f"Number of available CUDA devices: {cuda_count}.")
+        accelerator.print(f"Original training batch size: {dataloader_cfg['batch_size']}.")
+        accelerator.print(f"Original validation batch size: {val_dataloader_cfg['batch_size']}.")
+        dataloader_cfg['batch_size'] = max(1, dataloader_cfg['batch_size'] // cuda_count)
+        val_dataloader_cfg['batch_size'] = max(1, val_dataloader_cfg['batch_size'] // cuda_count)
+        accelerator.print(f"Updated training batch size: {dataloader_cfg['batch_size']}")
+        accelerator.print(f"Updated validation batch size: {val_dataloader_cfg['batch_size']}")
+        accelerator.print("###########################################")
         
         train_dataloader = DataLoader(dataset, **dataloader_cfg)
         # configure validation dataset
@@ -208,19 +221,6 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
-
-        # configure lr scheduler
-        lr_scheduler = get_scheduler(
-            cfg.training.lr_scheduler,
-            optimizer=self.optimizer,
-            num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(
-                len(train_dataloader) * cfg.training.num_epochs) \
-                    // cfg.training.gradient_accumulate_every,
-            # pytorch assumes stepping LRScheduler every epoch
-            # however huggingface diffusers steps it every batch
-            last_epoch=self.global_step-1
-        )
 
         # configure ema
         ema: EMAModel = None
@@ -248,18 +248,29 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         )
 
         # accelerator
-        train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
-            train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
+        train_dataloader, val_dataloader = accelerator.prepare(
+            train_dataloader, val_dataloader
         )
-        if accelerator.state.num_processes > 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                accelerator.unwrap_model(self.model),
-                device_ids=[self.model.device],
-                find_unused_parameters=True
-            )
+
+        # configure lr scheduler after dataloader sharding
+        lr_scheduler = get_scheduler(
+            cfg.training.lr_scheduler,
+            optimizer=self.optimizer,
+            num_warmup_steps=cfg.training.lr_warmup_steps,
+            num_training_steps=(
+                len(train_dataloader) * cfg.training.num_epochs) \
+                    // cfg.training.gradient_accumulate_every,
+            # pytorch assumes stepping LRScheduler every epoch
+            # however huggingface diffusers steps it every batch
+            last_epoch=self.global_step-1
+        )
+
+        self.model, self.optimizer, lr_scheduler = accelerator.prepare(
+            self.model, self.optimizer, lr_scheduler
+        )
 
         # device transfer
-        device = self.model.device
+        device = accelerator.device
         if self.ema_model is not None:
             self.ema_model.to(device)
 
@@ -277,13 +288,20 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        with JsonLogger(log_path) as json_logger:
+        json_logger_ctx = (
+            JsonLogger(log_path)
+            if accelerator.is_main_process
+            else contextlib.nullcontext(_NoOpJsonLogger())
+        )
+        with json_logger_ctx as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
+                self.model.train()
                 step_log = dict()
                 # ========= train for this epoch ==========
                 if cfg.training.freeze_encoder:
-                    self.model.obs_encoder.eval()
-                    self.model.obs_encoder.requires_grad_(False)
+                    unwrapped_model = accelerator.unwrap_model(self.model)
+                    unwrapped_model.obs_encoder.eval()
+                    unwrapped_model.obs_encoder.requires_grad_(False)
 
                 train_losses = list()
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
@@ -324,7 +342,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
                             accelerator.log(step_log, step=self.global_step)
-                            json_logger.log(step_log)
+                            if accelerator.is_main_process:
+                                json_logger.log(step_log)
                             self.global_step += 1
 
                         if (cfg.training.max_train_steps is not None) \
@@ -378,13 +397,12 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']
 
-                        all_preds, all_gt = accelerator.gather_for_metrics((pred_action, gt_action))
                         if pred_action.shape[-1] in [12, 13, 19]:
                             # ignore virtual target and stiffness
-                            all_preds = all_preds[..., :6]
-                            all_gt = all_gt[..., :6]
+                            pred_action = pred_action[..., :6]
+                            gt_action = gt_action[..., :6]
 
-                        mse = torch.nn.functional.mse_loss(all_preds, all_gt)
+                        mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                         step_log['train_action_mse_error'] = mse.item()
                         del batch
                         del obs_dict
@@ -429,7 +447,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 # end of epoch
                 # log of last step is combined with validation and rollout
                 accelerator.log(step_log, step=self.global_step)
-                json_logger.log(step_log)
+                if accelerator.is_main_process:
+                    json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
 
