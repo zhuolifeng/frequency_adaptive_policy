@@ -238,6 +238,9 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
         z_t = (1.0 - t.view(-1, 1, 1)) * x + t.view(-1, 1, 1) * noise
         v_target = noise - x
 
+        with torch.no_grad():
+            _, v_tangent = self._model_uv(z_t, t, t, obs_tokens, temporal_cond)
+
         def uv_fn(z, t_in, r_in):
             return self._model_uv(z, t_in, r_in, obs_tokens, temporal_cond)
 
@@ -246,7 +249,7 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
         (u, v), (du_dt, _) = torch.func.jvp(
             uv_fn,
             (z_t, t, r),
-            (v_target, dtdt, dtdr),
+            (v_tangent.detach(), dtdt, dtdr),
         )
         V = u + (t - r).view(-1, 1, 1) * du_dt.detach()
         v_target = v_target.detach()

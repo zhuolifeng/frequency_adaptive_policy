@@ -8,8 +8,6 @@ _target_: ImplicitRDP.workspace.train_dp_30hz_consistency_workspace.TrainDP30HzC
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: default
-prediction_type: sample
-loss_type: eps
 
 horizon: 16
 policy_horizon_30hz: 48
@@ -23,27 +21,22 @@ n_emb: 768
 
 consistency:
   sigma_data: 0.5
-  sigma_min: 0.002
+  sigma_min: 0.02
   sigma_max: 80.0
   rho: 7.0
   num_scales: 40
+  ctm_ode_steps_max: 1
   weight_schedule: karras
   consistency_weight: 1.0
+  dsm_weight: 1.0
+  sigma_sample_p_mean: -1.2
+  sigma_sample_p_std: 1.2
+  delta: -1.0
   num_inference_steps: 1
 
 policy:
   _target_: ImplicitRDP.policy.dp_30hz_consistency_policy.DP30HzConsistencyPolicy
   shape_meta: ${task.model_shape_meta}
-  noise_scheduler:
-    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
-    num_train_timesteps: 100
-    beta_start: 0.0001
-    beta_end: 0.02
-    beta_schedule: squaredcos_cap_v2
-    clip_sample: True
-    set_alpha_to_one: True
-    steps_offset: 0
-    prediction_type: ${prediction_type}
   obs_encoder:
     _target_: ImplicitRDP.model.vision.transformer_obs_encoder.TransformerObsEncoder
     shape_meta: ${task.model_shape_meta}
@@ -98,14 +91,18 @@ policy:
   action_normalizer_key: action_stack
   action_train_key: action_stack
   num_inference_steps: ${consistency.num_inference_steps}
-  loss_type: ${loss_type}
   sigma_data: ${consistency.sigma_data}
   sigma_min: ${consistency.sigma_min}
   sigma_max: ${consistency.sigma_max}
   rho: ${consistency.rho}
   num_scales: ${consistency.num_scales}
+  ctm_ode_steps_max: ${consistency.ctm_ode_steps_max}
   weight_schedule: ${consistency.weight_schedule}
   consistency_weight: ${consistency.consistency_weight}
+  dsm_weight: ${consistency.dsm_weight}
+  sigma_sample_p_mean: ${consistency.sigma_sample_p_mean}
+  sigma_sample_p_std: ${consistency.sigma_sample_p_std}
+  delta: ${consistency.delta}
   training_stage: 1
   use_amp_for_inference: False
   amp_dtype: bf16

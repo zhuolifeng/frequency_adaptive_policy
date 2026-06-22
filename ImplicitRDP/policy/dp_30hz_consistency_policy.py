@@ -1,8 +1,8 @@
+import math
 from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from einops import reduce
 from loguru import logger
 
@@ -13,7 +13,6 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
     def __init__(
         self,
         shape_meta: dict,
-        noise_scheduler: DDIMScheduler,
         obs_encoder: torch.nn.Module,
         model: torch.nn.Module,
         horizon: int,
@@ -30,14 +29,18 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         action_normalizer_key: str = "action_stack",
         action_train_key: str = "action_stack",
         num_inference_steps: int = 1,
-        loss_type: str = "eps",
         sigma_data: float = 0.5,
-        sigma_min: float = 0.002,
+        sigma_min: float = 0.02,
         sigma_max: float = 80.0,
         rho: float = 7.0,
         num_scales: int = 40,
+        ctm_ode_steps_max: int = 1,
         weight_schedule: str = "karras",
         consistency_weight: float = 1.0,
+        dsm_weight: float = 1.0,
+        sigma_sample_p_mean: float = -1.2,
+        sigma_sample_p_std: float = 1.2,
+        delta: float = -1.0,
         training_stage: int = 1,
         **kwargs,
     ):
@@ -61,28 +64,25 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
             num_inference_steps=num_inference_steps,
             **kwargs,
         )
-        self.noise_scheduler = noise_scheduler
-        self.loss_type = (loss_type or "eps").lower()
-        if self.loss_type == "epsilon":
-            self.loss_type = "eps"
-        if self.loss_type in ("v", "v_prediction"):
-            self.loss_type = "velocity"
-        if self.loss_type not in ("sample", "eps", "velocity"):
-            raise ValueError(f"Unsupported loss_type={loss_type}")
-
         self.sigma_data = float(sigma_data)
         self.sigma_min = float(sigma_min)
         self.sigma_max = float(sigma_max)
         self.rho = float(rho)
         self.num_scales = int(num_scales)
+        self.ctm_ode_steps_max = int(ctm_ode_steps_max)
         self.weight_schedule = weight_schedule
         self.consistency_weight = float(consistency_weight)
+        self.dsm_weight = float(dsm_weight)
+        self.sigma_sample_p_mean = float(sigma_sample_p_mean)
+        self.sigma_sample_p_std = float(sigma_sample_p_std)
+        self.delta = float(delta)
         self.training_stage = int(training_stage)
         self.set_training_stage(self.training_stage)
         logger.info(
             "DP30HzConsistencyPolicy initialized "
             f"(stage={self.training_stage}, num_scales={self.num_scales}, "
-            f"sigma_min={self.sigma_min}, sigma_max={self.sigma_max})"
+            f"sigma_min={self.sigma_min}, sigma_max={self.sigma_max}, "
+            f"dsm_weight={self.dsm_weight})"
         )
 
     def set_training_stage(self, stage: int):
@@ -108,63 +108,22 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         else:
             raise ValueError(f"Invalid training_stage={self.training_stage}")
 
-    def _get_variance_terms(self, timesteps: torch.Tensor, sample: torch.Tensor):
-        alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(device=sample.device, dtype=sample.dtype)
-        alpha_prod = alphas_cumprod[timesteps].view(-1, 1, 1)
-        beta_prod = 1.0 - alpha_prod
-        return alpha_prod, beta_prod
-
-    def _prediction_to_x0_eps(self, sample, model_output, timesteps):
-        alpha_prod, beta_prod = self._get_variance_terms(timesteps, sample)
-        sqrt_alpha = alpha_prod.sqrt()
-        sqrt_beta = beta_prod.sqrt()
-        if self.loss_type == "velocity":
-            pred_velocity = self._sample_prediction_to_velocity(sample, model_output, timesteps)
-            pred_x0 = sqrt_alpha * sample - sqrt_beta * pred_velocity
-            pred_eps = sqrt_alpha * pred_velocity + sqrt_beta * sample
-        else:
-            pred_x0 = model_output
-            pred_eps = (sample - sqrt_alpha * pred_x0) / sqrt_beta.clamp_min(1e-12)
-        return pred_x0, pred_eps
-
-    def _sample_prediction_to_velocity(self, sample, model_output, timesteps):
-        alpha_prod, beta_prod = self._get_variance_terms(timesteps, sample)
-        sqrt_alpha = alpha_prod.sqrt()
-        sqrt_beta = beta_prod.sqrt().clamp_min(1e-12)
-        return (sqrt_alpha * sample - model_output) / sqrt_beta
-
     def compute_stage1_loss(self, batch, loss_mask=None):
         obs_tokens, trajectory, temporal_cond = self._prepare_inputs(batch)
         batch_size = trajectory.shape[0]
-        device = trajectory.device
-        noise = torch.randn_like(trajectory)
-        timesteps = torch.randint(
-            0,
-            self.noise_scheduler.config.num_train_timesteps,
-            (batch_size,),
-            device=device,
-        ).long()
-        noisy = self.noise_scheduler.add_noise(trajectory, noise, timesteps)
-        pred = self.model(noisy, timesteps, cond=obs_tokens, temporal_cond=temporal_cond)
-
-        if self.loss_type == "sample":
-            loss_all = F.mse_loss(pred, trajectory, reduction="none")
-        elif self.loss_type == "eps":
-            _, pred_eps = self._prediction_to_x0_eps(noisy, pred, timesteps)
-            loss_all = F.mse_loss(pred_eps, noise, reduction="none")
-        elif self.loss_type == "velocity":
-            pred_velocity = self._sample_prediction_to_velocity(noisy, pred, timesteps)
-            target_velocity = self.noise_scheduler.get_velocity(trajectory, noise, timesteps)
-            loss_all = F.mse_loss(pred_velocity, target_velocity, reduction="none")
-        else:
-            raise ValueError(f"Unsupported loss_type={self.loss_type}")
-
-        loss_per = reduce(loss_all, "b ... -> b", "mean")
-        if loss_mask is not None:
-            loss_per = loss_per[loss_mask]
-        loss = loss_per.mean()
+        sigmas = self._sample_log_normal_sigmas(batch_size, trajectory.device, trajectory.dtype)
+        loss, raw_loss, denoised = self._compute_dsm_loss(
+            trajectory,
+            obs_tokens,
+            temporal_cond,
+            sigmas,
+            loss_mask=loss_mask,
+        )
         return loss, {
-            "base_dp_loss": loss.item(),
+            "edm_dsm_loss": loss.item(),
+            "edm_raw_huber": raw_loss.item(),
+            "edm_sigma_mean": sigmas.mean().item(),
+            "edm_denoised_abs_mean": denoised.detach().abs().mean().item(),
             "training_stage": 1.0,
             "total_loss": loss.item(),
         }
@@ -186,6 +145,37 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
             return torch.ones_like(snrs)
         raise NotImplementedError(f"Unsupported weight_schedule={self.weight_schedule}")
 
+    def _pseudo_huber_per_sample(self, pred: torch.Tensor, target: torch.Tensor):
+        squared_error = F.mse_loss(pred, target, reduction="none")
+        if self.delta == -1:
+            delta = torch.as_tensor(
+                math.sqrt(math.prod(pred.shape[1:])) * 0.00054,
+                device=pred.device,
+                dtype=pred.dtype,
+            )
+        else:
+            delta = torch.as_tensor(self.delta, device=pred.device, dtype=pred.dtype)
+        if self.delta == 0:
+            loss = squared_error
+        else:
+            loss = torch.sqrt(squared_error ** 2 + delta ** 2) - delta
+        return reduce(loss, "b ... -> b", "mean")
+
+    def _sample_log_normal_sigmas(self, batch_size: int, device: torch.device, dtype: torch.dtype):
+        sigmas = (
+            torch.randn(batch_size, device=device, dtype=dtype) * self.sigma_sample_p_std
+            + self.sigma_sample_p_mean
+        ).exp()
+        return sigmas.clamp(self.sigma_min, self.sigma_max)
+
+    def _karras_index_to_sigma(self, indices: torch.Tensor, dtype: torch.dtype):
+        idx = indices.to(dtype=dtype).clamp(0, self.num_scales)
+        ramp = idx / max(1, self.num_scales - 1)
+        max_inv_rho = self.sigma_max ** (1.0 / self.rho)
+        min_inv_rho = self.sigma_min ** (1.0 / self.rho)
+        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** self.rho
+        return sigmas.clamp(self.sigma_min, self.sigma_max)
+
     def _get_scalings(self, sigma: torch.Tensor, boundary: bool):
         sigma_data = torch.as_tensor(self.sigma_data, device=sigma.device, dtype=sigma.dtype)
         sigma_min = torch.as_tensor(self.sigma_min, device=sigma.device, dtype=sigma.dtype)
@@ -198,18 +188,73 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         c_in = 1 / (sigma ** 2 + sigma_data ** 2).sqrt()
         return c_skip, c_out, c_in
 
-    def _cm_denoise(self, policy, sample, sigmas, obs_tokens, temporal_cond, boundary=True):
+    def _cm_denoise(
+        self,
+        policy,
+        sample,
+        sigmas,
+        obs_tokens,
+        temporal_cond,
+        boundary=True,
+        stop_sigmas: Optional[torch.Tensor] = None,
+    ):
         c_skip, c_out, c_in = self._get_scalings(sigmas, boundary=boundary)
         model_input = self._append_dims(c_in, sample.ndim) * sample
         rescaled_t = 250.0 * torch.log(sigmas.clamp_min(1e-44))
+        kwargs = {}
+        if stop_sigmas is not None:
+            kwargs["time_cond"] = 250.0 * torch.log(stop_sigmas.clamp_min(1e-44))
         model_output = policy.model(
             model_input,
             rescaled_t,
             cond=obs_tokens,
             temporal_cond=temporal_cond,
+            **kwargs,
         )
         denoised = self._append_dims(c_out, sample.ndim) * model_output + self._append_dims(c_skip, sample.ndim) * sample
+        if stop_sigmas is not None:
+            ratio = self._append_dims((stop_sigmas / sigmas.clamp_min(1e-12)).clamp(0.0, 1.0), sample.ndim)
+            denoised = sample * ratio + denoised * (1.0 - ratio)
         return model_output, denoised
+
+    def _compute_dsm_loss(
+        self,
+        x_start: torch.Tensor,
+        obs_tokens: torch.Tensor,
+        temporal_cond: Optional[torch.Tensor],
+        sigmas: torch.Tensor,
+        loss_mask=None,
+        stop_sigmas: Optional[torch.Tensor] = None,
+    ):
+        noise = torch.randn_like(x_start)
+        x_t = x_start + noise * self._append_dims(sigmas, x_start.ndim)
+        _, denoised = self._cm_denoise(
+            self,
+            x_t,
+            sigmas,
+            obs_tokens,
+            temporal_cond,
+            boundary=True,
+            stop_sigmas=stop_sigmas,
+        )
+        loss_per = self._pseudo_huber_per_sample(denoised, x_start)
+        raw_loss = loss_per.mean()
+        loss_per = loss_per * self._get_weightings(sigmas)
+        if loss_mask is not None:
+            loss_per = loss_per[loss_mask]
+        return loss_per.mean(), raw_loss, denoised
+
+    def _sample_ctm_indices(self, batch_size: int, device: torch.device):
+        t_idx = torch.randint(0, self.num_scales, (batch_size,), device=device).long()
+        s_idx = torch.empty_like(t_idx)
+        u_idx = torch.empty_like(t_idx)
+        for i, t_i in enumerate(t_idx):
+            s_i = torch.randint(int(t_i.item()), self.num_scales + 1, (1,), device=device).long()
+            u_i = torch.randint(int(t_i.item()), int(s_i.item()) + 1, (1,), device=device).long()
+            u_i = torch.minimum(u_i, t_i + self.ctm_ode_steps_max)
+            s_idx[i] = s_i[0]
+            u_idx[i] = u_i[0]
+        return t_idx, s_idx, u_idx
 
     def _sample_karras_pairs(self, batch_size: int, device: torch.device, dtype: torch.dtype):
         indices = torch.randint(0, self.num_scales - 1, (batch_size,), device=device)
@@ -221,66 +266,128 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         t2 = (max_inv_rho + ramp_next * (min_inv_rho - max_inv_rho)) ** self.rho
         return t, t2
 
-    def _sigma_to_ddim_timestep(self, sigmas: torch.Tensor, dtype: torch.dtype):
-        alpha = 1.0 / (1.0 + sigmas ** 2)
-        alphas = self.noise_scheduler.alphas_cumprod.to(device=sigmas.device, dtype=dtype)
-        return torch.argmin(torch.abs(alphas[None, :] - alpha[:, None].to(dtype)), dim=1).long()
-
     @torch.no_grad()
     def _teacher_denoise_from_sigma(self, teacher_policy, sample, sigmas, obs_tokens, temporal_cond):
-        timesteps = teacher_policy._sigma_to_ddim_timestep(sigmas, sample.dtype)
-        teacher_input = sample / self._append_dims(torch.sqrt(1.0 + sigmas ** 2).to(sample.dtype), sample.ndim)
-        return teacher_policy.model(
-            teacher_input,
-            timesteps,
-            cond=obs_tokens,
-            temporal_cond=temporal_cond,
+        _, denoised = teacher_policy._cm_denoise(
+            teacher_policy,
+            sample,
+            sigmas,
+            obs_tokens,
+            temporal_cond,
+            boundary=True,
         )
+        return denoised
 
     @torch.no_grad()
-    def _heun_solver(self, samples, t, next_t, x0, obs_tokens, temporal_cond, teacher_policy):
+    def _heun_solver(self, samples, t, next_t, obs_tokens, temporal_cond, teacher_policy):
         x = samples
-        denoiser = x0 if teacher_policy is None else self._teacher_denoise_from_sigma(
-            teacher_policy, x, t, obs_tokens, temporal_cond
-        )
-        d = (x - denoiser) / self._append_dims(t.clamp_min(1e-12), x.ndim)
+        denoiser = self._teacher_denoise_from_sigma(teacher_policy, x, t, obs_tokens, temporal_cond)
+        step = self._append_dims(next_t - t, x.ndim)
+        mask = (step == 0).to(dtype=x.dtype)
+        d = (x - denoiser) / (self._append_dims(t.clamp_min(1e-12), x.ndim) + mask)
         samples = x + d * self._append_dims(next_t - t, x.ndim)
-        denoiser = x0 if teacher_policy is None else self._teacher_denoise_from_sigma(
-            teacher_policy, samples, next_t, obs_tokens, temporal_cond
-        )
-        next_d = (samples - denoiser) / self._append_dims(next_t.clamp_min(1e-12), x.ndim)
-        return x + (d + next_d) * self._append_dims((next_t - t) / 2, x.ndim)
+        denoiser = self._teacher_denoise_from_sigma(teacher_policy, samples, next_t, obs_tokens, temporal_cond)
+        next_d = (samples - denoiser) / (self._append_dims(next_t.clamp_min(1e-12), x.ndim) + mask)
+        out = x + (d + next_d) * self._append_dims((next_t - t) / 2, x.ndim)
+        return out * (1.0 - mask) + x * mask
+
+    @torch.no_grad()
+    def _teacher_rollout(self, samples, t_idx, u_idx, obs_tokens, temporal_cond, teacher_policy, dtype):
+        x = samples
+        for d in range(self.ctm_ode_steps_max):
+            current_idx = torch.minimum(t_idx + d, u_idx)
+            next_idx = torch.minimum(t_idx + d + 1, u_idx)
+            current_t = self._karras_index_to_sigma(current_idx, dtype=dtype)
+            next_t = self._karras_index_to_sigma(next_idx, dtype=dtype)
+            x = self._heun_solver(x, current_t, next_t, obs_tokens, temporal_cond, teacher_policy)
+        return x
 
     def compute_stage2_loss(self, batch, target_policy=None, teacher_policy=None, loss_mask=None):
         if target_policy is None:
             raise ValueError("Stage 2 consistency distillation requires target_policy.")
+        if teacher_policy is None:
+            raise ValueError("Stage 2 CTM distillation requires teacher_policy.")
+        target_policy.requires_grad_(False)
+        teacher_policy.requires_grad_(False)
         obs_tokens, x_start, temporal_cond = self._prepare_inputs(batch)
         batch_size = x_start.shape[0]
         noise = torch.randn_like(x_start)
-        t, t2 = self._sample_karras_pairs(batch_size, x_start.device, x_start.dtype)
+        t_idx, s_idx, u_idx = self._sample_ctm_indices(batch_size, x_start.device)
+        t = self._karras_index_to_sigma(t_idx, x_start.dtype)
+        s = self._karras_index_to_sigma(s_idx, x_start.dtype)
+        u = self._karras_index_to_sigma(u_idx, x_start.dtype)
         x_t = x_start + noise * self._append_dims(t, x_start.ndim)
 
-        _, distiller = self._cm_denoise(self, x_t, t, obs_tokens, temporal_cond, boundary=True)
+        _, pred = self._cm_denoise(
+            self,
+            x_t,
+            t,
+            obs_tokens,
+            temporal_cond,
+            boundary=True,
+            stop_sigmas=s,
+        )
         with torch.no_grad():
-            x_t2 = self._heun_solver(
-                x_t, t, t2, x_start, obs_tokens, temporal_cond, teacher_policy
+            x_u = self._teacher_rollout(
+                x_t, t_idx, u_idx, obs_tokens, temporal_cond, teacher_policy, x_start.dtype
             ).detach()
-            _, distiller_target = self._cm_denoise(
-                target_policy, x_t2, t2, obs_tokens, temporal_cond, boundary=True
+            _, target = self._cm_denoise(
+                target_policy,
+                x_u,
+                u,
+                obs_tokens,
+                temporal_cond,
+                boundary=True,
+                stop_sigmas=s,
             )
-            distiller_target = distiller_target.detach()
+            start = torch.full_like(s, self.sigma_min)
+            _, target = self._cm_denoise(
+                target_policy,
+                target,
+                s,
+                obs_tokens,
+                temporal_cond,
+                boundary=True,
+                stop_sigmas=start,
+            )
+            target = target.detach()
 
-        loss_per = reduce((distiller - distiller_target) ** 2, "b ... -> b", "mean")
-        loss_per = loss_per * self._get_weightings(t)
+        start = torch.full_like(s, self.sigma_min)
+        _, pred = self._cm_denoise(
+            target_policy,
+            pred,
+            s,
+            obs_tokens,
+            temporal_cond,
+            boundary=True,
+            stop_sigmas=start,
+        )
+
+        loss_per = self._pseudo_huber_per_sample(pred, target)
         if loss_mask is not None:
             loss_per = loss_per[loss_mask]
         consistency_loss = loss_per.mean()
-        total = self.consistency_weight * consistency_loss
+        dsm_sigmas = self._sample_log_normal_sigmas(batch_size, x_start.device, x_start.dtype)
+        dsm_stop = torch.full_like(dsm_sigmas, self.sigma_min)
+        dsm_loss, dsm_raw_loss, denoised = self._compute_dsm_loss(
+            x_start,
+            obs_tokens,
+            temporal_cond,
+            dsm_sigmas,
+            loss_mask=loss_mask,
+            stop_sigmas=dsm_stop,
+        )
+        total = self.consistency_weight * consistency_loss + self.dsm_weight * dsm_loss
         return total, {
             "cm_loss": total.item(),
             "cm_consistency_loss": consistency_loss.item(),
+            "cm_dsm_loss": dsm_loss.item(),
+            "cm_dsm_raw_huber": dsm_raw_loss.item(),
             "cm_t_mean": t.mean().item(),
-            "cm_t2_mean": t2.mean().item(),
+            "cm_s_mean": s.mean().item(),
+            "cm_u_mean": u.mean().item(),
+            "cm_dsm_sigma_mean": dsm_sigmas.mean().item(),
+            "cm_denoised_abs_mean": denoised.detach().abs().mean().item(),
             "training_stage": 2.0,
             "total_loss": total.item(),
         }
@@ -306,16 +413,15 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         )
 
     def _get_karras_sigmas(self, n: int, device: torch.device, dtype: torch.dtype):
-        ramp = torch.linspace(0, 1, n, device=device, dtype=dtype)
+        ramp = torch.linspace(0, 1, max(2, n), device=device, dtype=dtype)
         min_inv_rho = self.sigma_min ** (1.0 / self.rho)
         max_inv_rho = self.sigma_max ** (1.0 / self.rho)
-        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** self.rho
-        return torch.cat([sigmas, torch.zeros(1, device=device, dtype=dtype)])
+        return (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** self.rho
 
     def conditional_sample(self, cond, temporal_cond=None, generator=None, num_inference_steps=None, noisy_trajectory=None):
         batch_size = cond.shape[0]
         steps = self.num_inference_steps if num_inference_steps is None else int(num_inference_steps)
-        sigmas = self._get_karras_sigmas(max(1, steps), cond.device, cond.dtype)
+        sigmas = self._get_karras_sigmas(max(1, steps) + 1, cond.device, cond.dtype)
         if noisy_trajectory is None:
             trajectory = torch.randn(
                 (batch_size, self.action_horizon, self.action_dim),
@@ -329,12 +435,15 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         for i in range(len(sigmas) - 1):
             sigma = torch.full((batch_size,), sigmas[i].item(), device=trajectory.device, dtype=trajectory.dtype)
             next_sigma = torch.full((batch_size,), sigmas[i + 1].item(), device=trajectory.device, dtype=trajectory.dtype)
-            _, denoised = self._cm_denoise(self, trajectory, sigma, cond, temporal_cond, boundary=True)
-            if sigmas[i + 1].item() == 0:
-                trajectory = denoised
-            else:
-                d = (trajectory - denoised) / self._append_dims(sigma.clamp_min(1e-12), trajectory.ndim)
-                trajectory = trajectory + d * self._append_dims(next_sigma - sigma, trajectory.ndim)
+            _, trajectory = self._cm_denoise(
+                self,
+                trajectory,
+                sigma,
+                cond,
+                temporal_cond,
+                boundary=True,
+                stop_sigmas=next_sigma,
+            )
         return trajectory
 
     def sample_noisy_trajectory(self, B: int = 1, generator=None, return_expanded_noisy_trajectory: bool = False):

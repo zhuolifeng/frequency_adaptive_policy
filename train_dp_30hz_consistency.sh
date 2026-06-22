@@ -12,7 +12,6 @@ SEED="${SEED:-42}"
 
 EXP_NAME="${EXP_NAME:-dp_30hz_consistency}"
 POLICY_TASK_NAME="${TASK}_${DATASET_VERSION}_dp_30hz_consistency"
-LOSS_TYPE="${LOSS_TYPE:-eps}"
 
 STAGE1_EPOCHS="${STAGE1_EPOCHS:-600}"
 STAGE2_EPOCHS="${STAGE2_EPOCHS:-100}"
@@ -24,12 +23,17 @@ STAGE2_LR="${STAGE2_LR:-1.0e-5}"
 
 CONSISTENCY_NUM_INFERENCE_STEPS="${CONSISTENCY_NUM_INFERENCE_STEPS:-1}"
 SIGMA_DATA="${SIGMA_DATA:-0.5}"
-SIGMA_MIN="${SIGMA_MIN:-0.002}"
+SIGMA_MIN="${SIGMA_MIN:-0.02}"
 SIGMA_MAX="${SIGMA_MAX:-80.0}"
 RHO="${RHO:-7.0}"
 NUM_SCALES="${NUM_SCALES:-40}"
+CTM_ODE_STEPS_MAX="${CTM_ODE_STEPS_MAX:-1}"
 WEIGHT_SCHEDULE="${WEIGHT_SCHEDULE:-karras}"
 CONSISTENCY_WEIGHT="${CONSISTENCY_WEIGHT:-1.0}"
+DSM_WEIGHT="${DSM_WEIGHT:-1.0}"
+SIGMA_SAMPLE_P_MEAN="${SIGMA_SAMPLE_P_MEAN:--1.2}"
+SIGMA_SAMPLE_P_STD="${SIGMA_SAMPLE_P_STD:-1.2}"
+DELTA="${DELTA:--1.0}"
 
 USE_AMP_FOR_POLICY="${USE_AMP_FOR_POLICY:-False}"
 AMP_DTYPE_FOR_POLICY="${AMP_DTYPE_FOR_POLICY:-bf16}"
@@ -53,8 +57,9 @@ echo "  Task config:       ${TASK_CONFIG}"
 echo "  Dataset:           ${DATASET_PATH}"
 echo "  Stage epochs:      ${STAGE1_EPOCHS}/${STAGE2_EPOCHS}"
 echo "  LR:                ${STAGE1_LR}/${STAGE2_LR}"
-echo "  Loss type:         ${LOSS_TYPE}"
 echo "  Num scales:        ${NUM_SCALES}"
+echo "  CTM ODE steps:     ${CTM_ODE_STEPS_MAX}"
+echo "  Weights CM/DSM:    ${CONSISTENCY_WEIGHT}/${DSM_WEIGHT}"
 echo "=========================================="
 
 CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch "${ACCELERATE_ARGS[@]}" train.py \
@@ -63,7 +68,6 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch "${ACCELERATE_ARGS[@]}" train.p
     task.dataset_path="${DATASET_PATH}" \
     task.name="${POLICY_TASK_NAME}" \
     exp_name="${EXP_NAME}" \
-    loss_type="${LOSS_TYPE}" \
     training.seed="${SEED}" \
     training.stage1_epochs=${STAGE1_EPOCHS} \
     training.stage2_epochs=${STAGE2_EPOCHS} \
@@ -84,8 +88,13 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch "${ACCELERATE_ARGS[@]}" train.p
     consistency.sigma_max=${SIGMA_MAX} \
     consistency.rho=${RHO} \
     consistency.num_scales=${NUM_SCALES} \
+    consistency.ctm_ode_steps_max=${CTM_ODE_STEPS_MAX} \
     consistency.weight_schedule=${WEIGHT_SCHEDULE} \
     consistency.consistency_weight=${CONSISTENCY_WEIGHT} \
+    consistency.dsm_weight=${DSM_WEIGHT} \
+    consistency.sigma_sample_p_mean=${SIGMA_SAMPLE_P_MEAN} \
+    consistency.sigma_sample_p_std=${SIGMA_SAMPLE_P_STD} \
+    consistency.delta=${DELTA} \
     logging.backend=${LOGGING_BACKEND} \
     logging.mode=${LOGGING_MODE} \
     "$@"
