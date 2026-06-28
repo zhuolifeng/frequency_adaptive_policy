@@ -66,8 +66,8 @@ env_runner:
   _target_: ImplicitRDP.env_runner.real_stable_reactive_runner_30hz.RealStableReactiveRunner
   eval_episodes: 200
   max_duration_time: 400
-  tcp_action_update_interval: 18
-  gripper_action_update_interval: 18
+  tcp_action_update_interval: 30
+  gripper_action_update_interval: 30
   tcp_pos_clip_range: # no clip for x, y, z
     - [ -100, -100, -100 ]
     - [ 100, 100, 100 ]

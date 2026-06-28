@@ -15,6 +15,7 @@ from omegaconf import DictConfig, ListConfig
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFreqCD30HzConfidencePolicy
+from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_dual_policy import DPMultiFreqCD30HzConfidenceDualPolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
 from ImplicitRDP.env.real_bimanual.real_env import RealRobotEnvironment
@@ -25,6 +26,8 @@ from ImplicitRDP.common.space_utils import ortho6d_to_rotation_matrix_batch
 from ImplicitRDP.common.ensemble import EnsembleBuffer
 from ImplicitRDP.common.action_utils import (
     interpolate_actions_with_ratio,
+    interpolate_action_segment_by_time,
+    relative_xyz_action_segment_to_absolute_actions_by_time,
     relative_actions_to_absolute_actions,
     absolute_actions_to_relative_actions,
     matrix_actions_to_rpy_actions,
@@ -158,9 +161,16 @@ class RealStableReactiveRunner:
         self.control_fps_30hz = control_fps_30hz
         self.current_inference_head = initial_inference_head
         assert self.current_inference_head in ("10hz", "30hz")
-        self.control_fps = control_fps
-        self.control_interval_time = 1.0 / control_fps
-        self.inference_interval_time = 1.0 / control_fps
+        self.execution_fps = 100.0
+        self.execution_dt = 1.0 / self.execution_fps
+        self.policy_fps = float(control_fps_30hz if self.current_inference_head == "30hz" else control_fps_10hz)
+        self.policy_dt = 1.0 / self.policy_fps
+        self.control_fps = self.execution_fps
+        self.control_interval_time = self.execution_dt
+        self.inference_interval_time = self.policy_dt
+        self.relative_action_log_path = "/home/lifeng/frequency_adaptive_policy/relative_pos.txt"
+        with open(self.relative_action_log_path, "w", encoding="utf-8"):
+            pass
         self.latency_step = latency_step
         self.gripper_latency_step = gripper_latency_step if gripper_latency_step is not None else latency_step
         self.action_update_interval_10hz = (
@@ -258,12 +268,174 @@ class RealStableReactiveRunner:
     def spin_executor(executor):
         executor.spin()
 
+    def _reset_100hz_action_interpolation_state(self):
+        self.next_exec_time_for_100hz = 0.0
+        self.exec_buffer_timestep_for_100hz = 0
+        self.last_tcp_relative_action_for_100hz = None
+        self.last_tcp_command_for_100hz = None
+        self.last_executed_tcp_action_for_100hz = None
+
+    def _set_100hz_relative_start_from_last_command(
+        self,
+        base_absolute_action: np.ndarray,
+    ) -> None:
+        if self.last_tcp_command_for_100hz is None:
+            self.last_tcp_relative_action_for_100hz = None
+            return
+        base_action = self._get_interpolation_start_action(
+            self.last_tcp_command_for_100hz, base_absolute_action)
+        self.last_tcp_relative_action_for_100hz = absolute_actions_to_relative_actions(
+            self.last_tcp_command_for_100hz[None, :], base_action)[0]
+
+    def _log_relative_action(
+        self,
+        step_count: int,
+        policy_time: float,
+        tcp_relative_action: np.ndarray,
+    ) -> None:
+        tcp_relative_action = np.asarray(tcp_relative_action)
+        with open(self.relative_action_log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"step count {step_count} "
+                f"policy_time {policy_time:.6f} "
+                f"relative_xyz {tcp_relative_action[0]}, {tcp_relative_action[1]}, {tcp_relative_action[2]} "
+                f"action_dim {tcp_relative_action.shape[0]}\n"
+            )
+
+    def _get_interpolation_start_action(
+        self,
+        target_action: np.ndarray,
+        base_absolute_action: np.ndarray,
+    ) -> np.ndarray:
+        target_action = np.asarray(target_action)
+        base_absolute_action = np.asarray(base_absolute_action)
+        if target_action.shape[0] == 0:
+            return target_action.copy()
+        if base_absolute_action.shape == target_action.shape:
+            return base_absolute_action.copy()
+        if base_absolute_action.ndim == 1 and base_absolute_action.shape[0] >= target_action.shape[0]:
+            return base_absolute_action[:target_action.shape[0]].copy()
+        if base_absolute_action.ndim == 1 and base_absolute_action.shape[0] >= 3 and target_action.shape[0] >= 3:
+            start_action = target_action.copy()
+            start_action[:3] = base_absolute_action[:3]
+            return start_action
+        raise ValueError(
+            f"Cannot align interpolation start action shape {base_absolute_action.shape} "
+            f"with target action shape {target_action.shape}"
+        )
+
+    def _get_tcp_execution_action(self, action: np.ndarray) -> np.ndarray:
+        action = np.asarray(action)
+        if self.action_type == ActionType.left_arm_3D_translation_gripper_width or \
+                self.action_type == ActionType.right_arm_3D_translation:
+            return action[:3].copy()
+        if self.action_type == ActionType.left_arm_6DOF_gripper_width or \
+                self.action_type == ActionType.left_arm_6DOF_gripper_width_emb or \
+                self.action_type == ActionType.right_arm_6DOF or \
+                self.action_type == ActionType.right_arm_6DOF_wrench:
+            return action[:9].copy()
+        if self.action_type == ActionType.dual_arm_3D_translation_gripper_width:
+            return action[:6].copy()
+        raise NotImplementedError
+
+    def _get_gripper_execution_action(self, action: np.ndarray) -> np.ndarray:
+        action = np.asarray(action)
+        if self.action_type == ActionType.left_arm_3D_translation_gripper_width:
+            return action[3:].copy()
+        if self.action_type == ActionType.left_arm_6DOF_gripper_width or \
+                self.action_type == ActionType.left_arm_6DOF_gripper_width_emb:
+            return action[9:].copy()
+        if self.action_type == ActionType.dual_arm_3D_translation_gripper_width:
+            return action[6:].copy()
+        if self.action_type == ActionType.right_arm_3D_translation or \
+                self.action_type == ActionType.right_arm_6DOF or \
+                self.action_type == ActionType.right_arm_6DOF_wrench:
+            return np.empty((0,), dtype=action.dtype)
+        raise NotImplementedError
+
+    def _add_interpolated_actions_to_buffers(
+        self,
+        tcp_start_action: np.ndarray,
+        tcp_action: np.ndarray,
+        gripper_start_action: np.ndarray,
+        gripper_action: np.ndarray,
+        start_policy_time: float,
+        target_policy_time: float,
+        tcp_relative_action: Optional[np.ndarray] = None,
+    ) -> bool:
+        tcp_start_action = np.asarray(tcp_start_action)
+        tcp_action = np.asarray(tcp_action)
+        gripper_start_action = np.asarray(gripper_start_action)
+        gripper_action = np.asarray(gripper_action)
+        assert tcp_start_action.ndim == 1
+        assert tcp_action.ndim == 1
+        assert gripper_start_action.ndim == 1
+        assert gripper_action.ndim == 1
+
+        if tcp_relative_action is not None:
+            tcp_relative_action = np.asarray(tcp_relative_action)
+            assert tcp_relative_action.ndim == 1
+            assert tcp_relative_action.shape == tcp_action.shape
+            if self.last_executed_tcp_action_for_100hz is not None and \
+                    self.last_executed_tcp_action_for_100hz.shape == tcp_action.shape:
+                tcp_start_action = self.last_executed_tcp_action_for_100hz
+            tcp_action_100hz, next_exec_time = interpolate_action_segment_by_time(
+                prev_action=tcp_start_action,
+                target_action=tcp_action,
+                prev_policy_time=start_policy_time,
+                target_policy_time=target_policy_time,
+                next_exec_time=self.next_exec_time_for_100hz,
+                execution_dt=self.execution_dt,
+            )
+            gripper_action_100hz = np.repeat(
+                gripper_action[None, :], tcp_action_100hz.shape[0], axis=0)
+            self.last_tcp_relative_action_for_100hz = tcp_relative_action.copy()
+        else:
+            tcp_action_100hz, next_exec_time = interpolate_action_segment_by_time(
+                prev_action=tcp_start_action,
+                target_action=tcp_action,
+                prev_policy_time=start_policy_time,
+                target_policy_time=target_policy_time,
+                next_exec_time=self.next_exec_time_for_100hz,
+                execution_dt=self.execution_dt,
+            )
+            gripper_action_100hz, _ = interpolate_action_segment_by_time(
+                prev_action=gripper_start_action,
+                target_action=gripper_action,
+                prev_policy_time=start_policy_time,
+                target_policy_time=target_policy_time,
+                next_exec_time=self.next_exec_time_for_100hz,
+                execution_dt=self.execution_dt,
+            )
+
+        if tcp_action_100hz.shape[0] != gripper_action_100hz.shape[0]:
+            raise RuntimeError("TCP and gripper interpolation produced different lengths")
+
+        if tcp_action_100hz.shape[0] > 0:
+            self.last_tcp_command_for_100hz = tcp_action_100hz[-1].copy()
+            start_timestep = max(
+                self.tcp_ensemble_buffer.timestep,
+                self.gripper_ensemble_buffer.timestep,
+                self.tcp_ensemble_buffer.actions_start_timestep,
+                self.gripper_ensemble_buffer.actions_start_timestep,
+            )
+            self.tcp_ensemble_buffer.add_action(
+                tcp_action_100hz, start_timestep)
+            self.gripper_ensemble_buffer.add_action(
+                gripper_action_100hz, start_timestep)
+            self.exec_buffer_timestep_for_100hz = start_timestep + tcp_action_100hz.shape[0]
+
+        self.next_exec_time_for_100hz = next_exec_time
+        return tcp_action_100hz.shape[0] > 0
+
     def _set_runtime_head(self, head: str):
         assert head in ("10hz", "30hz")
         self.current_inference_head = head
-        self.control_fps = self.control_fps_30hz if head == "30hz" else self.control_fps_10hz
-        self.control_interval_time = 1.0 / self.control_fps
-        self.inference_interval_time = self.control_interval_time
+        self.policy_fps = float(self.control_fps_30hz if head == "30hz" else self.control_fps_10hz)
+        self.policy_dt = 1.0 / self.policy_fps
+        self.control_fps = self.execution_fps
+        self.control_interval_time = self.execution_dt
+        self.inference_interval_time = self.policy_dt
 
     def _get_action_update_interval(self, head: str, for_gripper: bool = False) -> int:
         if head == "30hz":
@@ -579,6 +751,7 @@ class RealStableReactiveRunner:
                              f"cur_time-start_time: {cur_time - start_time}")
                 self.action_step_count += 1
                 continue
+            self.last_executed_tcp_action_for_100hz = tcp_step_action.copy()
 
             if self.action_type == ActionType.left_arm_3D_translation_gripper_width or \
                     self.action_type == ActionType.right_arm_3D_translation: # (x, y, z, gripper_width)
@@ -639,7 +812,7 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, DPMultiFreqCD30HzConfidencePolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, DPMultiFreqCD30HzConfidencePolicy, DPMultiFreqCD30HzConfidenceDualPolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:
@@ -694,6 +867,7 @@ class RealStableReactiveRunner:
 
                 self.tcp_ensemble_buffer.clear()
                 self.gripper_ensemble_buffer.clear()
+                self._reset_100hz_action_interpolation_state()
                 logger.debug("Reset environment and policy.")
 
                 if self.enable_video_recording:
@@ -712,6 +886,7 @@ class RealStableReactiveRunner:
                 step_count = 0
                 steps_per_inference = 1
                 start_timestamp = time.time()
+                policy_time = 0.0
                 current_head = self.current_inference_head
                 self._set_runtime_head(current_head)
                 current_update_interval = self._get_action_update_interval(current_head)
@@ -749,6 +924,7 @@ class RealStableReactiveRunner:
                             logger.warning("No observation received! Skip this step.")
                             cur_time = time.time()
                             precise_sleep(max(0., self.inference_interval_time - (cur_time - start_time)))
+                            policy_time += self.inference_interval_time
                             step_count += steps_per_inference
                             continue
 
@@ -784,6 +960,7 @@ class RealStableReactiveRunner:
                                     if update_tcp:
                                         tcp_latent_action = latent_action
                                         tcp_base_absolute_action = base_absolute_action
+                                        self._set_100hz_relative_start_from_last_command(tcp_base_absolute_action)
                                     if update_gripper:
                                         gripper_latent_action = latent_action
                                         gripper_base_absolute_action = base_absolute_action
@@ -823,6 +1000,7 @@ class RealStableReactiveRunner:
                                         tcp_obs_tokens = obs_tokens
                                         tcp_noisy_trajectory = noisy_trajectory
                                         tcp_base_absolute_action = base_absolute_action
+                                        self._set_100hz_relative_start_from_last_command(tcp_base_absolute_action)
                                     if update_gripper:
                                         gripper_obs_tokens = obs_tokens
                                         gripper_noisy_trajectory = noisy_trajectory
@@ -940,15 +1118,34 @@ class RealStableReactiveRunner:
                             if self.use_rpy_for_rotation:
                                 tcp_action = rpy_actions_to_matrix_actions(tcp_action, self.action_type)
                                 gripper_action = rpy_actions_to_matrix_actions(gripper_action, self.action_type)
+
+                            tcp_relative_action = None
                             if self.use_relative_action:
-                                tcp_action = relative_actions_to_absolute_actions(tcp_action, tcp_base_absolute_action)
-                                gripper_action = relative_actions_to_absolute_actions(gripper_action, gripper_base_absolute_action)
+                                tcp_relative_action = self._get_tcp_execution_action(tcp_action[-1, :])
+                                self._log_relative_action(step_count, policy_time, tcp_relative_action)
+                                tcp_action = relative_actions_to_absolute_actions(
+                                    tcp_action[-1:, :], tcp_base_absolute_action)
+                                gripper_action = relative_actions_to_absolute_actions(
+                                    gripper_action[-1:, :], gripper_base_absolute_action)
+                            else:
+                                tcp_action = tcp_action[-1:, :]
+                                gripper_action = gripper_action[-1:, :]
 
-                            tcp_action = tcp_action[-1:, :]
-                            self.tcp_ensemble_buffer.add_action(tcp_action, step_count)
-
-                            gripper_action = gripper_action[-1:, :]
-                            self.gripper_ensemble_buffer.add_action(gripper_action, step_count)
+                            tcp_action = self._get_tcp_execution_action(tcp_action[-1, :])
+                            gripper_action = self._get_gripper_execution_action(gripper_action[-1, :])
+                            tcp_start_action = self._get_interpolation_start_action(
+                                tcp_action, tcp_base_absolute_action)
+                            gripper_start_action = self._get_interpolation_start_action(
+                                gripper_action, gripper_base_absolute_action)
+                            self._add_interpolated_actions_to_buffers(
+                                tcp_start_action=tcp_start_action,
+                                tcp_action=tcp_action,
+                                gripper_start_action=gripper_start_action,
+                                gripper_action=gripper_action,
+                                start_policy_time=policy_time,
+                                target_policy_time=policy_time + self.inference_interval_time,
+                                tcp_relative_action=tcp_relative_action,
+                            )
                         else:
                             action_dict = policy.predict_action(obs_dict)
 
@@ -1012,6 +1209,7 @@ class RealStableReactiveRunner:
                             logger.info(
                                 f"Episode {episode_idx} reaches max duration time {self.max_duration_time} seconds.")
                             break
+                        policy_time += self.inference_interval_time
                         step_count += steps_per_inference
 
                 except KeyboardInterrupt:

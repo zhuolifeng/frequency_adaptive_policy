@@ -51,6 +51,10 @@ class FlexivController():
         self.tdk_active = False
         self.pedal_thread: Optional[threading.Thread] = None
         self._stop_pedal_event = threading.Event()
+        self.tcp_move_step_count = 0
+        self.tcp_move_log_path = "/home/lifeng/frequency_adaptive_policy/tcp_pos.txt"
+        with open(self.tcp_move_log_path, "w", encoding="utf-8"):
+            pass
 
         try:
             self.mode = flexivrdk.Mode
@@ -320,6 +324,20 @@ class FlexivController():
                 a)
             
     def tcp_move(self, target_tcp):
+        cur_ft = self.robot.states().ext_wrench_in_world
+        origin_tcp = list(target_tcp[:3])
+        target_tcp[0] -= 0.0001 * cur_ft[0]
+        target_tcp[1] -= 0.0001 * cur_ft[1]
+        target_tcp[2] -= 0.0001 * cur_ft[2]
+        modified_tcp = list(target_tcp[:3])
+        with open(self.tcp_move_log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"step count {self.tcp_move_step_count} "
+                f"cur_ft {cur_ft[0]}, {cur_ft[1]}, {cur_ft[2]} "
+                f"origin_tcp {origin_tcp[0]}, {origin_tcp[1]}, {origin_tcp[2]} "
+                f"modified_tcp {modified_tcp[0]}, {modified_tcp[1]}, {modified_tcp[2]}\n"
+            )
+        self.tcp_move_step_count += 1
         self.robot.SendCartesianMotionForce(
                 target_tcp, 
                 [0.0]*6, 

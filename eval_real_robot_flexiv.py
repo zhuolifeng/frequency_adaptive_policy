@@ -8,6 +8,7 @@ from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFreqCD30HzConfidencePolicy
+from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_dual_policy import DPMultiFreqCD30HzConfidenceDualPolicy
 from ImplicitRDP.policy.act_30hz_policy import ACT30HzPolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
@@ -73,7 +74,7 @@ def main(cfg):
 
         # set inference params
         policy.num_inference_steps = 8  # DDIM inference iterations
-    elif isinstance(policy, DPMultiFreqCD30HzConfidencePolicy):
+    elif isinstance(policy, (DPMultiFreqCD30HzConfidencePolicy, DPMultiFreqCD30HzConfidenceDualPolicy)):
         # DP Multi-Frequency CD 30Hz + Confidence policy
         policy = workspace.model
         if cfg.training.use_ema:

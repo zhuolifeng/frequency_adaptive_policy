@@ -52,12 +52,13 @@ cv2.setNumThreads(12)
 
 # Get the total number of CPU cores
 total_cores = psutil.cpu_count()
-# Define the number of logical CPUs you want to bind to
-num_cores_to_bind = 20
-# Calculate the indices of the first logical CPUs
-# Ensure the number of cores to bind does not exceed the total number of cores
-cores_to_bind = set(range(min(num_cores_to_bind, total_cores)))
-# Set CPU affinity for the current process to the first logical CPUs
+# Bind the runner to the 19th and 20th logical CPUs (0-based CPU ids 18 and 19).
+runner_start_core_id = 18
+runner_num_cores = 2
+cores_to_bind = set(range(runner_start_core_id, min(runner_start_core_id + runner_num_cores, total_cores)))
+if not cores_to_bind:
+    cores_to_bind = {max(0, total_cores - 1)}
+# Set CPU affinity for the current process/thread
 os.sched_setaffinity(0, cores_to_bind)
 
 class RealRunner:
@@ -134,7 +135,7 @@ class RealRunner:
         rclpy.init(args=None)
         self.env = RealRobotEnvironment(transforms=self.transforms, **env_params)
         # set gripper to max width
-        self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width, self.action_type)
+        #self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width, self.action_type)
         time.sleep(2)
 
         self.max_duration_time = max_duration_time
@@ -596,6 +597,7 @@ class RealRunner:
                 self._visualize_dict_with_rerun(action_dict, "action")
 
             # Send action to the robot using ActionType
+            print(f"Executing action at step {self.action_step_count}: {step_action}")
             self.env.execute_action(step_action, self.action_type, use_relative_action=False)
             
             cur_time = time.time()
@@ -614,19 +616,31 @@ class RealRunner:
 
     def start_record_video(self, video_path):
         for vcamera_server_ip, vcamera_server_port in zip(self.vcamera_server_ip_list, self.vcamera_server_port_list):
-            response = self.session.post(f'http://{vcamera_server_ip}:{vcamera_server_port}/start_recording/{video_path}')
-            if response.status_code == 200:
-                logger.info(f"Start recording video to {video_path}")
-            else:
-                logger.error(f"Failed to start recording video to {video_path}")
+            try:
+                response = self.session.post(
+                    f'http://{vcamera_server_ip}:{vcamera_server_port}/start_recording/{video_path}',
+                    timeout=1.0,
+                )
+                if response.status_code == 200:
+                    logger.info(f"Start recording video to {video_path}")
+                else:
+                    logger.error(f"Failed to start recording video to {video_path}")
+            except requests.RequestException as e:
+                logger.error(f"Failed to start recording video to {video_path}: {e}")
 
     def stop_record_video(self):
         for vcamera_server_ip, vcamera_server_port in zip(self.vcamera_server_ip_list, self.vcamera_server_port_list):
-            response = self.session.post(f'http://{vcamera_server_ip}:{vcamera_server_port}/stop_recording')
-            if response.status_code == 200:
-                logger.info(f"Stop recording video")
-            else:
-                logger.error(f"Failed to stop recording video")
+            try:
+                response = self.session.post(
+                    f'http://{vcamera_server_ip}:{vcamera_server_port}/stop_recording',
+                    timeout=1.0,
+                )
+                if response.status_code == 200:
+                    logger.info(f"Stop recording video")
+                else:
+                    logger.error(f"Failed to stop recording video")
+            except requests.RequestException as e:
+                logger.error(f"Failed to stop recording video: {e}")
 
     def run(self, policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy]):
         if self.use_latent_action_with_rnn_decoder:
@@ -663,7 +677,7 @@ class RealRunner:
                 # start rollout
                 self.env.reset()
                 # set gripper to max width
-                self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width, self.action_type)
+                #self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width, self.action_type)
                 time.sleep(1)
 
                 policy.reset()

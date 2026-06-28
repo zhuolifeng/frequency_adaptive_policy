@@ -69,6 +69,110 @@ def interpolate_actions_with_ratio(actions: np.ndarray, N: int):
 
     return interpolated_actions
 
+def interpolate_action_segment_by_time(
+    prev_action: np.ndarray,
+    target_action: np.ndarray,
+    prev_policy_time: float,
+    target_policy_time: float,
+    next_exec_time: float,
+    execution_dt: float,
+):
+    """
+    Interpolate one low-frequency action segment onto a higher-frequency execution clock.
+
+    The output contains execution ticks in (prev_policy_time, target_policy_time].
+    This keeps non-integer ratios such as 30Hz -> 100Hz aligned to real time.
+    Only xyz dims are interpolated; remaining dims use the target action unchanged.
+    """
+    if target_policy_time <= prev_policy_time:
+        raise ValueError("target_policy_time must be greater than prev_policy_time")
+
+    prev_action = np.asarray(prev_action)
+    target_action = np.asarray(target_action)
+    assert prev_action.shape == target_action.shape
+    assert prev_action.ndim == 1
+
+    eps = 1e-9
+    exec_times = []
+    t = next_exec_time
+    while t <= target_policy_time + eps:
+        if t > prev_policy_time + eps:
+            exec_times.append(t)
+        t += execution_dt
+
+    if len(exec_times) == 0:
+        return np.empty((0, target_action.shape[-1]), dtype=target_action.dtype), t
+
+    exec_times = np.asarray(exec_times, dtype=np.float64)
+    ratios = (exec_times - prev_policy_time) / (target_policy_time - prev_policy_time)
+    ratios = np.clip(ratios, 0.0, 1.0)
+
+    interpolated_actions = np.repeat(target_action[None, :], len(exec_times), axis=0)
+    if target_action.shape[-1] >= 3:
+        xyz_dim = np.arange(3)
+        interpolated_actions[:, xyz_dim] = (
+            prev_action[None, xyz_dim]
+            + ratios[:, None] * (target_action[None, xyz_dim] - prev_action[None, xyz_dim])
+        )
+    return interpolated_actions.astype(target_action.dtype, copy=False), t
+
+def relative_xyz_action_segment_to_absolute_actions_by_time(
+    base_absolute_action: np.ndarray,
+    prev_relative_action: np.ndarray,
+    target_relative_action: np.ndarray,
+    prev_policy_time: float,
+    target_policy_time: float,
+    next_exec_time: float,
+    execution_dt: float,
+):
+    """
+    Resample one low-frequency relative target segment onto the execution clock.
+
+    The segment is anchored to one base_absolute_action. Only xyz is
+    interpolated in relative space from prev_relative_action to
+    target_relative_action; non-xyz dims use target_relative_action.
+    The returned actions are absolute commands.
+    """
+    if target_policy_time <= prev_policy_time:
+        raise ValueError("target_policy_time must be greater than prev_policy_time")
+
+    base_absolute_action = np.asarray(base_absolute_action)
+    prev_relative_action = np.asarray(prev_relative_action)
+    target_relative_action = np.asarray(target_relative_action)
+    assert base_absolute_action.ndim == 1
+    assert prev_relative_action.ndim == 1
+    assert target_relative_action.ndim == 1
+    assert prev_relative_action.shape == target_relative_action.shape
+    assert base_absolute_action.shape[0] == target_relative_action.shape[0]
+
+    eps = 1e-9
+    exec_relative_actions = []
+    segment_dt = target_policy_time - prev_policy_time
+    t = next_exec_time
+    while t <= target_policy_time + eps:
+        if t > prev_policy_time + eps:
+            ratio = (t - prev_policy_time) / segment_dt
+            ratio = float(np.clip(ratio, 0.0, 1.0))
+            exec_relative_action = target_relative_action.copy()
+            if exec_relative_action.shape[-1] >= 3:
+                exec_relative_action[:3] = (
+                    prev_relative_action[:3]
+                    + ratio * (target_relative_action[:3] - prev_relative_action[:3])
+                )
+            exec_relative_actions.append(exec_relative_action)
+        t += execution_dt
+
+    if len(exec_relative_actions) == 0:
+        return (
+            np.empty((0, target_relative_action.shape[-1]), dtype=target_relative_action.dtype),
+            t,
+        )
+
+    exec_relative_actions = np.asarray(exec_relative_actions, dtype=target_relative_action.dtype)
+    absolute_actions = relative_actions_to_absolute_actions(
+        exec_relative_actions, base_absolute_action=base_absolute_action)
+    return absolute_actions.astype(target_relative_action.dtype, copy=False), t
+
 def absolute_actions_to_relative_actions(actions: np.ndarray, base_absolute_action=None):
     actions = actions.copy()
     T, D = actions.shape

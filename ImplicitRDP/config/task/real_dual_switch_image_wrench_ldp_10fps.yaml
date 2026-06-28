@@ -31,7 +31,7 @@ shape_meta: &shape_meta
 
 env_runner:
   _target_: ImplicitRDP.env_runner.real_runner.RealRunner
-  eval_episodes: 200
+  eval_episodes: 6000
   max_duration_time: 20
   tcp_action_update_interval: 6
   gripper_action_update_interval: 6
@@ -64,7 +64,7 @@ env_runner:
     ensemble_mode: 'new'
   use_relative_action: ${task.dataset.relative_action}
   action_interpolation_ratio: 1
-  enable_video_recording: True
+  enable_video_recording: False
   vcamera_server_ip:
     - 192.168.2.242
   vcamera_server_port:
