@@ -9,6 +9,8 @@ from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePol
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFreqCD30HzConfidencePolicy
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_dual_policy import DPMultiFreqCD30HzConfidenceDualPolicy
+from ImplicitRDP.policy.dp_30hz_imeanflow_policy import DP30HziMeanFlowPolicy
+from ImplicitRDP.policy.dp_30hz_consistency_policy import DP30HzConsistencyPolicy
 from ImplicitRDP.policy.act_30hz_policy import ACT30HzPolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
@@ -108,6 +110,22 @@ def main(cfg):
             f"steps_30hz={policy.num_inference_steps_30hz}, "
             f"use_confidence={policy.use_confidence_based_head_selection}, "
             f"threshold={policy.confidence_threshold_for_head_selection}"
+        )
+    elif isinstance(policy, (DP30HziMeanFlowPolicy, DP30HzConsistencyPolicy)):
+        # DP 30Hz iMeanFlow / Consistency policy
+        policy = workspace.model
+        if cfg.training.use_ema:
+            policy = workspace.ema_model
+        device = torch.device('cuda')
+        policy.eval().to(device)
+        policy.num_inference_steps = int(
+            cfg.policy.get('num_inference_steps', policy.num_inference_steps)
+        )
+        logger.info(
+            f"{policy.__class__.__name__}: horizon={getattr(policy, 'horizon', None)}, "
+            f"action_start_30hz={getattr(policy, 'action_start_30hz', None)}, "
+            f"n_action_steps={getattr(policy, 'n_action_steps', None)}, "
+            f"num_inference_steps={policy.num_inference_steps}"
         )
     elif isinstance(policy, ACT30HzPolicy):
         # ACT 30Hz policy

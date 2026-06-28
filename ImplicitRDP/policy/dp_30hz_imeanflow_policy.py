@@ -163,9 +163,19 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
             return obs_tokens, temporal_cond
         return obs_tokens
 
-    def predict_obs_tokens(self, *args, **kwargs) -> torch.Tensor:
+    def predict_obs_tokens(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+        extended_obs_dict: Optional[Dict[str, torch.Tensor]] = None,
+        return_expanded_obs_tokens: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
         with autocast(enabled=self.use_amp_for_inference, dtype=self.amp_dtype):
-            return self._predict_obs_tokens(*args, **kwargs)
+            obs_tokens = self._predict_obs_tokens(obs_dict, extended_obs_dict, **kwargs)
+            B = obs_tokens.shape[0]
+            if return_expanded_obs_tokens:
+                return obs_tokens.reshape(B, -1, self.n_emb)
+            return obs_tokens.reshape(B, -1)
 
     def _prepare_inputs(self, batch):
         actions = batch[self.action_train_key]
