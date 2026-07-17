@@ -11,6 +11,7 @@ from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFre
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_dual_policy import DPMultiFreqCD30HzConfidenceDualPolicy
 from ImplicitRDP.policy.dp_30hz_imeanflow_policy import DP30HziMeanFlowPolicy
 from ImplicitRDP.policy.dp_30hz_consistency_policy import DP30HzConsistencyPolicy
+from ImplicitRDP.policy.dp_10hz_rectified_flow_consistency_policy import DP10HzRectifiedFlowConsistencyPolicy
 from ImplicitRDP.policy.act_30hz_policy import ACT30HzPolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
@@ -111,8 +112,8 @@ def main(cfg):
             f"use_confidence={policy.use_confidence_based_head_selection}, "
             f"threshold={policy.confidence_threshold_for_head_selection}"
         )
-    elif isinstance(policy, (DP30HziMeanFlowPolicy, DP30HzConsistencyPolicy)):
-        # DP 30Hz iMeanFlow / Consistency policy
+    elif isinstance(policy, (DP30HziMeanFlowPolicy, DP30HzConsistencyPolicy, DP10HzRectifiedFlowConsistencyPolicy)):
+        # DP single-frequency flow / consistency policy
         policy = workspace.model
         if cfg.training.use_ema:
             policy = workspace.ema_model
@@ -121,11 +122,21 @@ def main(cfg):
         policy.num_inference_steps = int(
             cfg.policy.get('num_inference_steps', policy.num_inference_steps)
         )
+        if hasattr(policy, "set_training_stage"):
+            training_stage = int(cfg.policy.get(
+                "inference_training_stage",
+                getattr(workspace, "current_stage", getattr(policy, "training_stage", 1)),
+            ))
+            policy.set_training_stage(training_stage)
+        else:
+            training_stage = None
         logger.info(
             f"{policy.__class__.__name__}: horizon={getattr(policy, 'horizon', None)}, "
+            f"action_start_10hz={getattr(policy, 'action_start_10hz', None)}, "
             f"action_start_30hz={getattr(policy, 'action_start_30hz', None)}, "
             f"n_action_steps={getattr(policy, 'n_action_steps', None)}, "
-            f"num_inference_steps={policy.num_inference_steps}"
+            f"num_inference_steps={policy.num_inference_steps}, "
+            f"training_stage={training_stage}"
         )
     elif isinstance(policy, ACT30HzPolicy):
         # ACT 30Hz policy

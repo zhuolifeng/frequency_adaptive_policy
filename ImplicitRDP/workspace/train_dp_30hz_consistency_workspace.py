@@ -29,7 +29,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
-    include_keys = ["global_step", "epoch", "current_stage"]
+    include_keys = ["global_step", "epoch", "current_stage", "ema_optimization_step"]
 
     def __init__(self, cfg: OmegaConf):
         super().__init__(cfg)
@@ -56,9 +56,14 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         self.optimizer = self.model.get_optimizer(**self._optimizer_cfg_for_stage(cfg, self.current_stage))
         self.global_step = 0
         self.epoch = 0
+        self.ema_optimization_step = 0
+        self._resume_teacher_restored = False
+        self._resume_ema_restored = False
         self.scaler = GradScaler() if cfg.training.get("use_amp", False) else None
-        if not cfg.training.resume:
-            self.exclude_keys = ["optimizer", "scaler", "teacher_model"]
+        # Optimizer/scaler restoration is not stage-safe because Stage 1 and
+        # Stage 2 use different parameter groups. Rebuild them from current_stage
+        # on resume, but always checkpoint the frozen teacher and EMA target.
+        self.exclude_keys = ["optimizer", "scaler"]
 
     def _optimizer_cfg_for_stage(self, cfg, stage: int):
         opt = OmegaConf.to_container(cfg.optimizer, resolve=True)
@@ -123,6 +128,7 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
     def _reset_ema(self, ema):
         ema.decay = 0.0
         ema.optimization_step = 0
+        self.ema_optimization_step = 0
         logger.info("Reset EMA decay schedule for Stage 2")
 
     def _refresh_teacher_from_model(self, accelerator, device):
@@ -168,6 +174,70 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         self.load_payload(payload, exclude_keys=["optimizer", "scaler"], include_keys=[], strict=False)
         logger.info(f"Loaded pretrained checkpoint: {ckpt_path}")
 
+    def _restore_stage2_teacher_from_stage1_checkpoint(self, stage2_checkpoint_path):
+        stage1_path = pathlib.Path(stage2_checkpoint_path).parent.joinpath("stage1_final.ckpt")
+        if not stage1_path.is_file():
+            raise RuntimeError(
+                "Stage-2 checkpoint does not contain teacher_model and no "
+                f"Stage-1 teacher checkpoint was found at {stage1_path}. "
+                "Refusing to replace the frozen teacher with the current student."
+            )
+        payload = torch.load(
+            stage1_path.open("rb"),
+            pickle_module=dill,
+            map_location="cpu",
+        )
+        state_dicts = payload.get("state_dicts", {})
+        teacher_state = state_dicts.get("ema_model", state_dicts.get("model"))
+        if teacher_state is None:
+            raise RuntimeError(
+                f"No model or ema_model state was found in Stage-1 checkpoint {stage1_path}."
+            )
+        self.teacher_model.load_state_dict(teacher_state, strict=True)
+        self._resume_teacher_restored = True
+        logger.info(f"Restored frozen Stage-1 teacher from {stage1_path}")
+
+    def _prepare_restored_stage2_models(self, accelerator, device):
+        if not self._resume_teacher_restored:
+            raise RuntimeError(
+                "Stage-2 resume requires the frozen Stage-1 teacher, but it was not restored."
+            )
+        if not self._resume_ema_restored:
+            raise RuntimeError(
+                "Stage-2 resume requires the EMA target model, but it was not restored."
+            )
+        self.teacher_model.set_training_stage(2)
+        self.teacher_model.apply_stage_freeze()
+        self.teacher_model.eval()
+        self.teacher_model.requires_grad_(False)
+        self.teacher_model.to(device)
+        self.ema_model.set_training_stage(2)
+        self.ema_model.eval()
+        self.ema_model.requires_grad_(False)
+        logger.info("Preserved frozen teacher and EMA target from Stage-2 checkpoint")
+
+    def _preserve_checkpoint_time_condition_layout(self, payload):
+        if self.current_stage != 2:
+            return
+        checkpoint_cfg = payload.get("cfg", None)
+        checkpoint_position = "prepend"
+        if checkpoint_cfg is not None:
+            checkpoint_position = OmegaConf.select(
+                checkpoint_cfg,
+                "policy.model.time_cond_position",
+                default="prepend",
+            )
+        current_position = self.model.model.time_cond_position
+        if checkpoint_position == current_position:
+            return
+        for policy in (self.model, self.teacher_model, self.ema_model):
+            policy.model.time_cond_position = checkpoint_position
+        logger.warning(
+            "Stage-2 checkpoint was trained with "
+            f"time_cond_position={checkpoint_position}; overriding the current "
+            f"setting ({current_position}) to preserve resume semantics."
+        )
+
     def run(self):
         cfg = copy.deepcopy(self.cfg)
         use_amp = cfg.training.get("use_amp", False)
@@ -181,12 +251,29 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         self._init_trackers(accelerator, cfg)
         cuda_count = accelerator.num_processes
 
+        resume_checkpoint_path = None
         if cfg.training.resume:
             latest_ckpt_path = self.get_checkpoint_path()
             if latest_ckpt_path.is_file():
                 logger.info(f"Resuming from checkpoint {latest_ckpt_path}")
-                self.load_checkpoint(path=latest_ckpt_path, strict=False)
+                payload = self.load_checkpoint(path=latest_ckpt_path, map_location="cpu")
+                resume_checkpoint_path = latest_ckpt_path
+                state_dicts = payload.get("state_dicts", {})
+                self._resume_teacher_restored = "teacher_model" in state_dicts
+                self._resume_ema_restored = "ema_model" in state_dicts
+                self._preserve_checkpoint_time_condition_layout(payload)
+                if self.current_stage == 2 and not self._resume_teacher_restored:
+                    self._restore_stage2_teacher_from_stage1_checkpoint(latest_ckpt_path)
         self._load_pretrained_if_needed(cfg)
+        if resume_checkpoint_path is not None:
+            self.model.set_training_stage(self.current_stage)
+            self.model.apply_stage_freeze()
+            self.optimizer = self.model.get_optimizer(
+                **self._optimizer_cfg_for_stage(cfg, self.current_stage)
+            )
+            if self.scaler is not None:
+                self.scaler = GradScaler()
+            logger.info(f"Rebuilt optimizer for resumed Stage {self.current_stage}")
 
         dataset: BaseImageDataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
@@ -211,21 +298,28 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
 
-        total_epochs = self.stage1_epochs + self.stage2_epochs
-        stage2_start = self.stage1_epochs
-        if self.current_stage == 2:
-            total_epochs = self.stage2_epochs
-            stage2_start = 0
+        if self.current_stage == 1:
+            remaining_stage1_epochs = max(0, self.stage1_epochs - self.epoch)
+            stage_schedule = [1] * remaining_stage1_epochs + [2] * self.stage2_epochs
+        else:
+            completed_stage2_epochs = max(0, self.epoch - self.stage1_epochs)
+            remaining_stage2_epochs = max(0, self.stage2_epochs - completed_stage2_epochs)
+            stage_schedule = [2] * remaining_stage2_epochs
+        total_epochs = len(stage_schedule)
 
-        num_steps = (len(train_dataloader) * max(1, self.stage1_epochs if self.current_stage == 1 else self.stage2_epochs)) // cfg.training.gradient_accumulate_every
+        current_stage_epochs = stage_schedule.count(self.current_stage)
+        num_steps = (
+            len(train_dataloader) * max(1, current_stage_epochs)
+        ) // cfg.training.gradient_accumulate_every
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=max(1, num_steps),
-            last_epoch=self.global_step - 1,
+            last_epoch=-1 if resume_checkpoint_path is not None else self.global_step - 1,
         )
         ema = hydra.utils.instantiate(cfg.ema, model=self.ema_model)
+        ema.optimization_step = int(self.ema_optimization_step)
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, "checkpoints"),
             **cfg.checkpoint.topk,
@@ -242,17 +336,24 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         self.teacher_model.to(device)
         self.ema_model.to(device)
         if self.current_stage == 2:
-            self._refresh_teacher_from_model(accelerator, device)
-            self.ema_model.load_state_dict(accelerator.unwrap_model(self.model).state_dict(), strict=True)
+            if resume_checkpoint_path is not None:
+                self._prepare_restored_stage2_models(accelerator, device)
+            else:
+                # This path is used when Stage 1 is intentionally skipped after
+                # loading a pretrained teacher/student initialization.
+                self._refresh_teacher_from_model(accelerator, device)
+                self.ema_model.load_state_dict(
+                    accelerator.unwrap_model(self.model).state_dict(),
+                    strict=True,
+                )
 
         log_path = os.path.join(self.output_dir, "logs.json.txt")
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(total_epochs):
-                stage = 1 if local_epoch_idx < stage2_start else 2
+            for local_epoch_idx, stage in enumerate(stage_schedule):
                 stage_name = "Stage 1 Base DP" if stage == 1 else "Stage 2 Consistency Distillation"
                 unwrapped_model: DP30HzConsistencyPolicy = accelerator.unwrap_model(self.model)
                 unwrapped_model.set_training_stage(stage)
-                unwrapped_model.update_progress(local_epoch_idx / max(1, total_epochs))
+                unwrapped_model.update_progress(self.epoch / max(1, self.stage1_epochs + self.stage2_epochs))
                 self.model.train()
                 unwrapped_model.apply_stage_freeze()
                 self.teacher_model.eval()
@@ -295,6 +396,7 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
                             self.optimizer.zero_grad(set_to_none=True)
                             lr_scheduler.step()
                             ema.step(accelerator.unwrap_model(self.model))
+                            self.ema_optimization_step = int(ema.optimization_step)
 
                         raw_loss_cpu = raw_loss.item()
                         train_losses.append(raw_loss_cpu)
@@ -357,7 +459,8 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
                 json_logger.log(step_log)
                 self.global_step += 1
 
-                if stage == 1 and local_epoch_idx == self.stage1_epochs - 1 and self.stage2_epochs > 0:
+                next_stage = stage_schedule[local_epoch_idx + 1] if local_epoch_idx + 1 < total_epochs else None
+                if stage == 1 and next_stage == 2:
                     self._sync_model_from_ema(accelerator)
                     self._save_named_checkpoint(accelerator, "stage1_final.ckpt")
                     self._refresh_teacher_from_model(accelerator, device)

@@ -30,6 +30,7 @@ class TransformerForDP30Hz(ModuleAttrMixin):
         horizon_30hz: int = 48,
         action_key: str = "action_stack",
         out_dim_multiplier: int = 1,
+        time_cond_position: str = "prepend",
     ) -> None:
         super().__init__()
 
@@ -95,6 +96,12 @@ class TransformerForDP30Hz(ModuleAttrMixin):
         self.horizon_30hz = horizon_30hz
         self.action_key = action_key
         self.out_dim_multiplier = int(out_dim_multiplier)
+        self.time_cond_position = str(time_cond_position)
+        if self.time_cond_position not in ("prepend", "append"):
+            raise ValueError(
+                "time_cond_position must be either 'prepend' or 'append', "
+                f"got {self.time_cond_position}."
+            )
         self.n_emb = n_emb
 
         self.apply(self._init_weights)
@@ -189,16 +196,24 @@ class TransformerForDP30Hz(ModuleAttrMixin):
         timesteps = self._expand_timesteps(timestep, B, device, sample.dtype)
         time_emb = self.time_emb(timesteps).unsqueeze(1)
 
-        cond_emb = time_emb
+        extra_time_emb = None
         if time_cond is not None:
             if len(time_cond.shape) == 1:
                 time_cond = time_cond[:, None]
             time_cond = time_cond.to(device=device, dtype=sample.dtype)
             extra_time_emb = self.time_emb(time_cond.reshape(-1)).reshape(B, -1, self.n_emb)
-            cond_emb = torch.cat([cond_emb, extra_time_emb], dim=1)
+        cond_obs_emb = None
         if self.cond_obs_emb is not None and cond is not None:
             cond_obs_emb = self.cond_obs_emb(cond)
-            cond_emb = torch.cat([cond_emb, cond_obs_emb], dim=1)
+
+        cond_parts = [time_emb]
+        if self.time_cond_position == "prepend" and extra_time_emb is not None:
+            cond_parts.append(extra_time_emb)
+        if cond_obs_emb is not None:
+            cond_parts.append(cond_obs_emb)
+        if self.time_cond_position == "append" and extra_time_emb is not None:
+            cond_parts.append(extra_time_emb)
+        cond_emb = torch.cat(cond_parts, dim=1)
 
         tc = cond_emb.shape[1]
         cond_emb = self.drop(cond_emb + self.cond_pos_emb[:, :tc, :])

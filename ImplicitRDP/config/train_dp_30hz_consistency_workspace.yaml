@@ -31,7 +31,15 @@ consistency:
   dsm_weight: 1.0
   sigma_sample_p_mean: -1.2
   sigma_sample_p_std: 1.2
+  dsm_karras_proportion: 0.5
+  dsm_karras_ramp_max: 0.7
+  clamp_log_normal_sigmas: False
   delta: -1.0
+  initial_noise_scale: 1.0
+  clip_sample: True
+  clip_sample_min: -1.0
+  clip_sample_max: 1.0
+  chaining_indices: null
   num_inference_steps: 1
 
 policy:
@@ -79,6 +87,8 @@ policy:
     horizon_30hz: ${policy_horizon_30hz}
     action_key: action_stack
     out_dim_multiplier: 1
+    # Keep observation-token positions fixed when the CTM stop-time is added.
+    time_cond_position: append
   n_emb: ${n_emb}
   horizon: ${policy_horizon_30hz}
   n_action_steps: ${n_action_steps_30hz}
@@ -102,7 +112,15 @@ policy:
   dsm_weight: ${consistency.dsm_weight}
   sigma_sample_p_mean: ${consistency.sigma_sample_p_mean}
   sigma_sample_p_std: ${consistency.sigma_sample_p_std}
+  dsm_karras_proportion: ${consistency.dsm_karras_proportion}
+  dsm_karras_ramp_max: ${consistency.dsm_karras_ramp_max}
+  clamp_log_normal_sigmas: ${consistency.clamp_log_normal_sigmas}
   delta: ${consistency.delta}
+  initial_noise_scale: ${consistency.initial_noise_scale}
+  clip_sample: ${consistency.clip_sample}
+  clip_sample_min: ${consistency.clip_sample_min}
+  clip_sample_max: ${consistency.clip_sample_max}
+  chaining_indices: ${consistency.chaining_indices}
   training_stage: 1
   use_amp_for_inference: False
   amp_dtype: bf16

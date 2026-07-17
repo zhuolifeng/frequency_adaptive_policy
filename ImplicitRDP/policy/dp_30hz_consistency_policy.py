@@ -40,7 +40,15 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         dsm_weight: float = 1.0,
         sigma_sample_p_mean: float = -1.2,
         sigma_sample_p_std: float = 1.2,
+        dsm_karras_proportion: float = 0.5,
+        dsm_karras_ramp_max: float = 0.7,
+        clamp_log_normal_sigmas: bool = False,
         delta: float = -1.0,
+        initial_noise_scale: float = 1.0,
+        clip_sample: bool = True,
+        clip_sample_min: float = -1.0,
+        clip_sample_max: float = 1.0,
+        chaining_indices: Optional[Tuple[int, ...]] = None,
         training_stage: int = 1,
         **kwargs,
     ):
@@ -75,14 +83,44 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         self.dsm_weight = float(dsm_weight)
         self.sigma_sample_p_mean = float(sigma_sample_p_mean)
         self.sigma_sample_p_std = float(sigma_sample_p_std)
+        self.dsm_karras_proportion = float(dsm_karras_proportion)
+        self.dsm_karras_ramp_max = float(dsm_karras_ramp_max)
+        self.clamp_log_normal_sigmas = bool(clamp_log_normal_sigmas)
         self.delta = float(delta)
+        self.initial_noise_scale = float(initial_noise_scale)
+        self.clip_sample = bool(clip_sample)
+        self.clip_sample_min = float(clip_sample_min)
+        self.clip_sample_max = float(clip_sample_max)
+        self.chaining_indices = (
+            None if chaining_indices is None else tuple(int(index) for index in chaining_indices)
+        )
+        if self.num_scales < 2:
+            raise ValueError(f"num_scales must be at least 2, got {self.num_scales}.")
+        if not 0.0 <= self.dsm_karras_proportion <= 1.0:
+            raise ValueError(
+                "dsm_karras_proportion must be in [0, 1], "
+                f"got {self.dsm_karras_proportion}."
+            )
+        if not 0.0 < self.dsm_karras_ramp_max <= 1.0:
+            raise ValueError(
+                f"dsm_karras_ramp_max must be in (0, 1], got {self.dsm_karras_ramp_max}."
+            )
+        if self.initial_noise_scale < 0.0:
+            raise ValueError(f"initial_noise_scale must be non-negative, got {self.initial_noise_scale}.")
+        if self.clip_sample_min >= self.clip_sample_max:
+            raise ValueError(
+                "clip_sample_min must be smaller than clip_sample_max, "
+                f"got {self.clip_sample_min} and {self.clip_sample_max}."
+            )
         self.training_stage = int(training_stage)
         self.set_training_stage(self.training_stage)
         logger.info(
             "DP30HzConsistencyPolicy initialized "
             f"(stage={self.training_stage}, num_scales={self.num_scales}, "
             f"sigma_min={self.sigma_min}, sigma_max={self.sigma_max}, "
-            f"dsm_weight={self.dsm_weight})"
+            f"dsm_weight={self.dsm_weight}, "
+            f"dsm_karras_proportion={self.dsm_karras_proportion}, "
+            f"initial_noise_scale={self.initial_noise_scale})"
         )
 
     def set_training_stage(self, stage: int):
@@ -161,12 +199,56 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
             loss = torch.sqrt(squared_error ** 2 + delta ** 2) - delta
         return reduce(loss, "b ... -> b", "mean")
 
-    def _sample_log_normal_sigmas(self, batch_size: int, device: torch.device, dtype: torch.dtype):
+    def _sample_log_normal_sigmas(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        clamp: Optional[bool] = None,
+    ):
         sigmas = (
             torch.randn(batch_size, device=device, dtype=dtype) * self.sigma_sample_p_std
             + self.sigma_sample_p_mean
         ).exp()
-        return sigmas.clamp(self.sigma_min, self.sigma_max)
+        if clamp is None:
+            clamp = self.clamp_log_normal_sigmas
+        if clamp:
+            sigmas = sigmas.clamp(self.sigma_min, self.sigma_max)
+        return sigmas
+
+    def _sample_ctm_dsm_sigmas(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        """Match the reference CTM DSM mixture.
+
+        The high-noise component samples a uniform Karras ramp in [0, 0.7]
+        by default, while the remaining samples use the EDM log-normal law.
+        """
+        karras_size = int(math.ceil(batch_size * self.dsm_karras_proportion))
+        log_normal_size = batch_size - karras_size
+        parts = []
+        if karras_size > 0:
+            ramp = torch.rand(karras_size, device=device, dtype=dtype)
+            ramp = ramp * self.dsm_karras_ramp_max
+            max_inv_rho = self.sigma_max ** (1.0 / self.rho)
+            min_inv_rho = self.sigma_min ** (1.0 / self.rho)
+            karras_sigmas = (
+                max_inv_rho + ramp * (min_inv_rho - max_inv_rho)
+            ) ** self.rho
+            parts.append(karras_sigmas.clamp(self.sigma_min, self.sigma_max))
+        if log_normal_size > 0:
+            parts.append(
+                self._sample_log_normal_sigmas(
+                    log_normal_size,
+                    device,
+                    dtype,
+                    clamp=self.clamp_log_normal_sigmas,
+                )
+            )
+        return torch.cat(parts, dim=0)
 
     def _karras_index_to_sigma(self, indices: torch.Tensor, dtype: torch.dtype):
         idx = indices.to(dtype=dtype).clamp(0, self.num_scales)
@@ -213,7 +295,7 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         )
         denoised = self._append_dims(c_out, sample.ndim) * model_output + self._append_dims(c_skip, sample.ndim) * sample
         if stop_sigmas is not None:
-            ratio = self._append_dims((stop_sigmas / sigmas.clamp_min(1e-12)).clamp(0.0, 1.0), sample.ndim)
+            ratio = self._append_dims(stop_sigmas / sigmas.clamp_min(1e-12), sample.ndim)
             denoised = sample * ratio + denoised * (1.0 - ratio)
         return model_output, denoised
 
@@ -367,7 +449,11 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         if loss_mask is not None:
             loss_per = loss_per[loss_mask]
         consistency_loss = loss_per.mean()
-        dsm_sigmas = self._sample_log_normal_sigmas(batch_size, x_start.device, x_start.dtype)
+        dsm_sigmas = self._sample_ctm_dsm_sigmas(
+            batch_size,
+            x_start.device,
+            x_start.dtype,
+        )
         dsm_stop = torch.full_like(dsm_sigmas, self.sigma_min)
         dsm_loss, dsm_raw_loss, denoised = self._compute_dsm_loss(
             x_start,
@@ -418,23 +504,85 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         max_inv_rho = self.sigma_max ** (1.0 / self.rho)
         return (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** self.rho
 
+    def _resolve_chaining_indices(self, steps: int):
+        if steps <= 1:
+            return []
+        if steps > self.num_scales:
+            raise ValueError(
+                f"num_inference_steps={steps} exceeds num_scales={self.num_scales}."
+            )
+        if self.chaining_indices is not None:
+            required = steps - 1
+            if len(self.chaining_indices) < required:
+                raise ValueError(
+                    f"Need at least {required} chaining_indices for {steps} inference steps, "
+                    f"got {len(self.chaining_indices)}."
+                )
+            indices = list(self.chaining_indices[:required])
+        else:
+            indices = [round(i * self.num_scales / steps) for i in range(1, steps)]
+        if any(index <= 0 or index >= self.num_scales for index in indices):
+            raise ValueError(
+                f"chaining_indices must lie in [1, {self.num_scales - 1}], got {indices}."
+            )
+        if any(left >= right for left, right in zip(indices, indices[1:])):
+            raise ValueError(f"chaining_indices must be strictly increasing, got {indices}.")
+        return indices
+
+    def _clip_inference_sample(self, sample: torch.Tensor):
+        if not self.clip_sample:
+            return sample
+        return sample.clamp(self.clip_sample_min, self.clip_sample_max)
+
     def conditional_sample(self, cond, temporal_cond=None, generator=None, num_inference_steps=None, noisy_trajectory=None):
         batch_size = cond.shape[0]
         steps = self.num_inference_steps if num_inference_steps is None else int(num_inference_steps)
-        sigmas = self._get_karras_sigmas(max(1, steps) + 1, cond.device, cond.dtype)
+        steps = max(1, steps)
         if noisy_trajectory is None:
             trajectory = torch.randn(
                 (batch_size, self.action_horizon, self.action_dim),
                 dtype=cond.dtype,
                 device=cond.device,
                 generator=generator,
-            ) * sigmas[0]
+            ) * self.initial_noise_scale
         else:
             trajectory = noisy_trajectory
 
-        for i in range(len(sigmas) - 1):
-            sigma = torch.full((batch_size,), sigmas[i].item(), device=trajectory.device, dtype=trajectory.dtype)
-            next_sigma = torch.full((batch_size,), sigmas[i + 1].item(), device=trajectory.device, dtype=trajectory.dtype)
+        sigma = torch.full(
+            (batch_size,),
+            self.sigma_max,
+            device=trajectory.device,
+            dtype=trajectory.dtype,
+        )
+        stop_sigma = torch.full_like(sigma, self.sigma_min)
+        _, trajectory = self._cm_denoise(
+            self,
+            trajectory,
+            sigma,
+            cond,
+            temporal_cond,
+            boundary=True,
+            stop_sigmas=stop_sigma,
+        )
+        trajectory = self._clip_inference_sample(trajectory)
+
+        for index in self._resolve_chaining_indices(steps):
+            sigma = self._karras_index_to_sigma(
+                torch.full(
+                    (batch_size,),
+                    index,
+                    device=trajectory.device,
+                    dtype=torch.long,
+                ),
+                dtype=trajectory.dtype,
+            )
+            noise = torch.randn(
+                trajectory.shape,
+                dtype=trajectory.dtype,
+                device=trajectory.device,
+                generator=generator,
+            )
+            trajectory = trajectory + noise * self._append_dims(sigma, trajectory.ndim)
             _, trajectory = self._cm_denoise(
                 self,
                 trajectory,
@@ -442,8 +590,9 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
                 cond,
                 temporal_cond,
                 boundary=True,
-                stop_sigmas=next_sigma,
+                stop_sigmas=stop_sigma,
             )
+            trajectory = self._clip_inference_sample(trajectory)
         return trajectory
 
     def sample_noisy_trajectory(self, B: int = 1, generator=None, return_expanded_noisy_trajectory: bool = False):
@@ -452,7 +601,7 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
             dtype=torch.float32,
             device=self.device,
             generator=generator,
-        ) * self.sigma_max
+        ) * self.initial_noise_scale
         if return_expanded_noisy_trajectory:
             return noisy
         return noisy.reshape(B, -1)
