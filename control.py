@@ -1,8 +1,17 @@
+import os
+
+# Set native math limits before importing NumPy/SciPy/OpenCV or Flexiv.
+# Parallel math workers can spin on TDK's realtime threads and exhaust the
+# realtime CPU budget, especially with this process restricted to four CPUs.
+for _thread_limit_var in (
+    "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "OMP_NUM_THREADS"
+):
+    os.environ[_thread_limit_var] = "1"
+
 import threading
 import multiprocessing
 import psutil
 import time
-import os
 
 import rclpy
 from ImplicitRDP.real_world.real_world_transforms import RealWorldTransforms
@@ -14,15 +23,9 @@ import hydra
 from omegaconf import DictConfig
 from loguru import logger
 
-# add this to prevent assigning too many threads when using numpy
-os.environ["OPENBLAS_NUM_THREADS"] = "12"
-os.environ["MKL_NUM_THREADS"] = "12"
-os.environ["NUMEXPR_NUM_THREADS"] = "12"
-os.environ["OMP_NUM_THREADS"] = "12"
-
 import cv2
 # add this to prevent assigning too many threads when using open-cv
-cv2.setNumThreads(12)
+cv2.setNumThreads(1)
 
 # Set the CPU affinity to the last 4 logical CPUs to avoid conflict with the runner/eval process.
 # get the total number of cores

@@ -38,12 +38,15 @@ class FlexivController():
                  enable_tdk: bool = False,
                  leader_sn: Optional[str] = None,
                  pedal_poll_interval: float = 0.01,
+                 network_interface_whitelist: Optional[List[str]] = None,
                  ) -> None:
         self.DOF=7
         self.is_default_cartesian_impedance = True
         self.enable_tdk = enable_tdk
         self.leader_sn = leader_sn
         self.pedal_poll_interval = pedal_poll_interval
+        # Flexiv expects local IPv4 addresses, not interface names or robot IPs.
+        self.network_interface_whitelist = list(network_interface_whitelist or [])
         self.teleop = None
         self.flexivtdk = None
         self._leader_robot = None
@@ -52,9 +55,6 @@ class FlexivController():
         self.pedal_thread: Optional[threading.Thread] = None
         self._stop_pedal_event = threading.Event()
         self.tcp_move_step_count = 0
-        self.tcp_move_log_path = "/home/lifeng/frequency_adaptive_policy/tcp_pos.txt"
-        with open(self.tcp_move_log_path, "w", encoding="utf-8"):
-            pass
 
         try:
             self.mode = flexivrdk.Mode
@@ -91,12 +91,12 @@ class FlexivController():
                 self.robot.SwitchMode(self.mode.NRT_CARTESIAN_MOTION_FORCE)
         except Exception as e:
             logger.error("Error occurred while connecting to robot server: %s" % str(e))
-            return None
+            raise
 
     def _create_robot_handle(self, robot_serial_number: str) -> Any:
         if not self.enable_tdk:
             logger.info(f"Creating RDK robot interface for follower {robot_serial_number}")
-            return flexivrdk.Robot(robot_serial_number)
+            return flexivrdk.Robot(robot_serial_number, self.network_interface_whitelist)
 
         if self.leader_sn is None:
             raise ValueError("leader_sn must be specified when enable_tdk=True")
@@ -110,10 +110,11 @@ class FlexivController():
         self._set_rotation_via_rdk(robot_serial_number)
 
         logger.info(
-            f"Creating TDK teleop instance (leader={self.leader_sn}, follower={robot_serial_number})"
+            f"Creating TDK teleop instance (leader={self.leader_sn}, follower={robot_serial_number}, "
+            f"interfaces={self.network_interface_whitelist or 'all'})"
         )
         self.teleop = self.flexivtdk.TransparentCartesianTeleopLAN(
-            [(self.leader_sn, robot_serial_number)], []
+            [(self.leader_sn, robot_serial_number)], self.network_interface_whitelist
         )
         self._leader_robot, follower_robot = self.teleop.instances(0)
         logger.info("TDK teleop instance created; follower robot handle obtained from teleop.instances(0)")
@@ -123,9 +124,18 @@ class FlexivController():
         """Temporarily connect to a follower arm via RDK, move to a fixed orientation, then release."""
         try:
             logger.info(f"Connecting to follower arm {robot_serial_number} via RDK to zero FT sensor ...")
-            follower_tmp = flexivrdk.Robot(robot_serial_number)
+            follower_tmp = flexivrdk.Robot(robot_serial_number, self.network_interface_whitelist)
             self._check_and_enable_robot(follower_tmp, robot_serial_number)
-            self.execute_primitive("ZeroFTSensor", {})
+            follower_tmp.SwitchMode(self.mode.NRT_PRIMITIVE_EXECUTION)
+            follower_tmp.ExecutePrimitive("ZeroFTSensor", {})
+            deadline = time.monotonic() + 30.0
+            while not self.parse_pt_terminated_or_reachedTarget(follower_tmp.primitive_states()):
+                if follower_tmp.fault():
+                    raise RuntimeError("Follower entered fault state during ZeroFTSensor")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("ZeroFTSensor did not complete within 30 seconds")
+                time.sleep(0.01)
+            logger.info("Follower FT sensor zeroing completed")
             current_tcp = follower_tmp.states().tcp_pose
             fixed_orientation = [0.17364820837974548, 2.201380311817047e-06, 0.9848077297210693, 8.990650144369283e-07]
             target_tcp = current_tcp[:3] + fixed_orientation
@@ -141,7 +151,8 @@ class FlexivController():
             del follower_tmp
             time.sleep(1.0)
         except Exception as e:
-            logger.error(f"Failed to zero FT sensor on robot {robot_serial_number}: {e}")
+            logger.error(f"Failed to prepare follower arm {robot_serial_number}: {e}")
+            raise
 
     def _start_tdk(self) -> None:
         if self.teleop.stopped(0):

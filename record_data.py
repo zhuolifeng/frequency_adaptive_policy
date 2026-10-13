@@ -2,6 +2,7 @@ from hydra import initialize, compose
 import rclpy
 import os.path as osp
 import sys
+from pathlib import Path
 from loguru import logger
 from ImplicitRDP.real_world.real_world_transforms import RealWorldTransforms
 from ImplicitRDP.real_world.teleoperation.data_recorder import DataRecorder
@@ -33,6 +34,8 @@ def main(args=None):
     import argparse
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Data Recorder')
+    parser.add_argument('--task', type=str, default=None,
+                        help='Task YAML name without .yaml; defaults to real_world_env task')
     parser.add_argument('--save_file_dir', type=str, default='tests')
     parser.add_argument('--save_file_name', type=str, default='test.pkl', help='File name of the save file')
     parser.add_argument('--save_to_disk', action='store_true', default=False, help='Whether to save the data to disk')
@@ -41,14 +44,18 @@ def main(args=None):
     args = parser.parse_args()
         
     with initialize(config_path='ImplicitRDP/config', version_base="1.1"):
-        cfg = compose(config_name="real_world_env")
+        overrides = [f"task={args.task}"] if args.task else []
+        cfg = compose(config_name="real_world_env", overrides=overrides)
 
     rclpy_args = sys.argv
     rclpy.init(args=rclpy_args)
     
 
-    base_dir = f'/home/lifeng/frequency_adaptive_policy/data/{args.save_file_dir}'
+    base_dir = Path(__file__).resolve().parent / 'data' / args.save_file_dir
     save_path = osp.join(base_dir, args.save_file_name)
+    if args.save_to_disk and osp.exists(save_path):
+        raise FileExistsError(f"Recording already exists: {save_path}. Choose a new --save_file_name.")
+    logger.info(f"Recording destination: {save_path}")
     
     transforms = RealWorldTransforms(option=cfg.task.transforms)
     node = DataRecorder(transforms,

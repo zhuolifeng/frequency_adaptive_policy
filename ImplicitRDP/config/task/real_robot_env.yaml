@@ -1,7 +1,8 @@
 robot_server:
-  host_ip: "192.168.1.200"
+  host_ip: "127.0.0.1"
   port: 8092
   left_robot_serial_number: "Rizon4"
+  right_leader_sn: "Rizon4-062931"
   right_robot_serial_number: "Rizon4s-062033"
   left_gripper_name: null
   right_gripper_name: "Robotiq-2F-85"
@@ -17,7 +18,7 @@ publisher:
     vr_server_force_port: 10005
     sensor_stacks: null
 teleop_server:
-  host_ip: "192.168.1.200"
+  host_ip: "127.0.0.1"
   port: 8082
   fps: 60
   use_force_control_for_gripper: False

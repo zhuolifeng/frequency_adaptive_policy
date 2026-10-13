@@ -29,6 +29,7 @@ class BimanualFlexivServer():
                  right_enable_tdk: bool = False,
                  left_leader_sn: Optional[str] = None,
                  right_leader_sn: Optional[str] = None,
+                 network_interface_whitelist: Optional[List[str]] = None,
                  ) -> None:
         self.host_ip = host_ip
         self.port = port
@@ -59,6 +60,7 @@ class BimanualFlexivServer():
                 gripper_name=left_gripper_name,
                 enable_tdk=self.left_enable_tdk,
                 leader_sn=self.left_leader_sn,
+                network_interface_whitelist=network_interface_whitelist,
             )
             self.left_robot.robot.SwitchMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
             # open the gripper
@@ -73,6 +75,7 @@ class BimanualFlexivServer():
                 gripper_name=right_gripper_name,
                 enable_tdk=self.right_enable_tdk,
                 leader_sn=self.right_leader_sn,
+                network_interface_whitelist=network_interface_whitelist,
             )
             if self.right_robot.enable_tdk and self.right_robot.teleop is not None:
                 pass
