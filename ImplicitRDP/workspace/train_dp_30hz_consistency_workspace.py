@@ -1,7 +1,6 @@
 import copy
 import os
 import pathlib
-import pickle
 import random
 
 import dill
@@ -29,7 +28,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
-    include_keys = ["global_step", "epoch", "current_stage", "ema_optimization_step"]
+    include_keys = ["global_step", "epoch", "current_stage", "ema_optimization_step", "stage2_epochs_completed"]
 
     def __init__(self, cfg: OmegaConf):
         super().__init__(cfg)
@@ -44,11 +43,16 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         if not cfg.training.use_ema:
             raise ValueError("TrainDP30HzConsistencyWorkspace expects training.use_ema=True")
         self.ema_model = copy.deepcopy(self.model)
+        self.teacher_model.set_training_stage(1)
         self.teacher_model.eval()
         self.teacher_model.requires_grad_(False)
 
         self.stage1_epochs = int(cfg.training.get("stage1_epochs", 600))
         self.stage2_epochs = int(cfg.training.get("stage2_epochs", 100))
+        if cfg.training.debug:
+            self.stage1_epochs = min(1, max(0, self.stage1_epochs))
+            self.stage2_epochs = 1
+        self.stage2_epochs_completed = 0
         self.current_stage = 1 if self.stage1_epochs > 0 else 2
         self.model.set_training_stage(self.current_stage)
         self.model.apply_stage_freeze()
@@ -57,8 +61,6 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         self.global_step = 0
         self.epoch = 0
         self.ema_optimization_step = 0
-        self._resume_teacher_restored = False
-        self._resume_ema_restored = False
         self.scaler = GradScaler() if cfg.training.get("use_amp", False) else None
         # Optimizer/scaler restoration is not stage-safe because Stage 1 and
         # Stage 2 use different parameter groups. Rebuild them from current_stage
@@ -120,26 +122,17 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         self.model = model_ddp
         logger.info(f"Saved checkpoint: {path}")
 
-    def _sync_model_from_ema(self, accelerator):
+    def _start_distillation(self, accelerator, save_stage1=False):
         unwrapped_model = accelerator.unwrap_model(self.model)
         unwrapped_model.load_state_dict(self.ema_model.state_dict(), strict=True)
-        logger.info("Synchronized train model from EMA model")
-
-    def _reset_ema(self, ema):
-        ema.decay = 0.0
-        ema.optimization_step = 0
-        self.ema_optimization_step = 0
-        logger.info("Reset EMA decay schedule for Stage 2")
-
-    def _refresh_teacher_from_model(self, accelerator, device):
-        unwrapped_model = accelerator.unwrap_model(self.model)
+        if save_stage1:
+            self._save_named_checkpoint(accelerator, "stage1_final.ckpt")
         self.teacher_model.load_state_dict(unwrapped_model.state_dict(), strict=True)
-        self.teacher_model.set_training_stage(2)
-        self.teacher_model.apply_stage_freeze()
-        self.teacher_model.eval()
-        self.teacher_model.requires_grad_(False)
-        self.teacher_model.to(device)
-        logger.info("Refreshed frozen consistency teacher from Stage 1 model")
+        self.current_stage = 2
+        unwrapped_model.set_training_stage(2)
+        self.ema_model.set_training_stage(2)
+        self.ema_optimization_step = 0
+        logger.info("Initialized Stage 2 student and frozen teacher from Stage 1 EMA")
 
     def _rebuild_for_stage(self, cfg, accelerator, train_dataloader, val_dataloader, stage: int, stage_epochs: int):
         unwrapped_model = accelerator.unwrap_model(self.model)
@@ -166,13 +159,105 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         )
         return train_dataloader, val_dataloader, lr_scheduler
 
+    @staticmethod
+    def _with_stage1_weights(payload):
+        # Older Stage 1 checkpoints may have only one trained copy.
+        states = payload["state_dicts"]
+        teacher = states.get("ema_model", states.get("model"))
+        if not teacher:
+            raise ValueError("Stage-1 checkpoint needs trained model or EMA weights.")
+        return {**payload, "state_dicts": {"model": teacher, "ema_model": teacher, **states}}
+
+    def load_payload(self, payload, exclude_keys=None, include_keys=None, **kwargs):
+        restore_stage = include_keys is None or "current_stage" in include_keys
+        if restore_stage:
+            if "current_stage" not in payload.get("pickles", {}):
+                raise ValueError("Consistency checkpoint is missing current_stage metadata.")
+            stored_stage = dill.loads(payload["pickles"]["current_stage"])
+            states = payload["state_dicts"]
+            if stored_stage == 1:
+                payload = self._with_stage1_weights(payload)
+            elif stored_stage == 2 and (not states.get("model") or not states.get("ema_model")):
+                raise ValueError("Stage-2 checkpoint needs both model and EMA weights.")
+        super().load_payload(payload, exclude_keys, include_keys, **kwargs)
+        if restore_stage:
+            # The stage is workspace metadata, not part of the policy state_dict.
+            self.model.set_training_stage(self.current_stage)
+            self.ema_model.set_training_stage(self.current_stage)
+            self._preserve_checkpoint_time_condition_layout(payload)
+
+    def _resume_training(self, cfg, accelerator, checkpoint_path):
+        payload = self.load_checkpoint(
+            path=checkpoint_path, exclude_keys=self.exclude_keys,
+            include_keys=self.include_keys, map_location="cpu",
+        )
+        metadata = payload["pickles"]
+        if "epoch" not in metadata:
+            raise ValueError("Consistency training resume needs epoch metadata.")
+        # Older periodic saves used the just-finished epoch index, while final
+        # saves used an epoch count. Without a marker, a legacy resume can
+        # repeat its last epoch. Keep the recorded value for those checkpoints.
+        if self.current_stage == 1:
+            if "ema_model" not in payload["state_dicts"]:
+                self.ema_optimization_step = 0
+            if self.epoch >= self.stage1_epochs and self.stage2_epochs > 0:
+                self._start_distillation(accelerator)
+        else:
+            self._check_stage2_checkpoint(payload, checkpoint_path)
+            if "stage2_epochs_completed" not in metadata:
+                # Legacy checkpoints stored only the total across both stages.
+                training = payload.get("cfg", {}).get("training", {})
+                if "stage1_epochs" not in training:
+                    raise ValueError("Legacy Stage-2 resume needs the checkpoint's training.stage1_epochs.")
+                stage1_epochs = int(training["stage1_epochs"])
+                if training.get("debug"):
+                    stage1_epochs = min(1, max(0, stage1_epochs))
+                self.stage2_epochs_completed = max(0, self.epoch - stage1_epochs)
+        self.optimizer = self.model.get_optimizer(**self._optimizer_cfg_for_stage(cfg, self.current_stage))
+        if self.scaler is not None:
+            self.scaler = GradScaler()
+        logger.info(f"Rebuilt optimizer for resumed Stage {self.current_stage}")
+
+    def _remaining_stages(self):
+        stage1 = max(0, self.stage1_epochs - self.epoch) if self.current_stage == 1 else 0
+        stage2 = max(0, self.stage2_epochs - self.stage2_epochs_completed)
+        return [1] * stage1 + [2] * stage2
+
     def _load_pretrained_if_needed(self, cfg):
-        if cfg.training.get("pretrained_ckpt_path", None) is None:
+        ckpt_path = cfg.training.get("pretrained_ckpt_path")
+        if ckpt_path is None:
+            if self.current_stage == 2:
+                raise ValueError(
+                    "Stage 2 needs a trained teacher. Set training.pretrained_ckpt_path "
+                    "to a Stage-1 checkpoint, resume an existing run, or train Stage 1 first."
+                )
             return
-        ckpt_path = cfg.training.pretrained_ckpt_path
-        payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill, map_location="cpu")
-        self.load_payload(payload, exclude_keys=["optimizer", "scaler"], include_keys=[], strict=False)
+        payload = torch.load(ckpt_path, pickle_module=dill, map_location="cpu")
+        if self.current_stage == 1:
+            payload = self._with_stage1_weights(payload)
+            self.load_payload(payload, exclude_keys=["optimizer", "scaler"], include_keys=[], strict=False)
+        else:
+            states = payload["state_dicts"]
+            stored_stage = payload.get("pickles", {}).get("current_stage")
+            if stored_stage is not None and dill.loads(stored_stage) == 2:
+                self.load_payload(payload, exclude_keys=["optimizer", "scaler"], include_keys=[], strict=True)
+                self._check_stage2_checkpoint(payload, ckpt_path)
+                self._preserve_checkpoint_time_condition_layout(payload)
+            else:
+                # Match the normal Stage 1 -> 2 transition, including EMA selection.
+                teacher_state = states.get("ema_model", states.get("model"))
+                if not teacher_state:
+                    raise ValueError(f"No trained policy weights in teacher checkpoint {ckpt_path}.")
+                for policy in (self.model, self.ema_model, self.teacher_model):
+                    policy.load_state_dict(teacher_state, strict=True)
         logger.info(f"Loaded pretrained checkpoint: {ckpt_path}")
+
+    def _check_stage2_checkpoint(self, payload, checkpoint_path):
+        states = payload["state_dicts"]
+        if not states.get("model") or not states.get("ema_model"):
+            raise ValueError(f"Stage-2 checkpoint {checkpoint_path} needs both model and EMA weights.")
+        if not states.get("teacher_model"):
+            self._restore_stage2_teacher_from_stage1_checkpoint(checkpoint_path)
 
     def _restore_stage2_teacher_from_stage1_checkpoint(self, stage2_checkpoint_path):
         stage1_path = pathlib.Path(stage2_checkpoint_path).parent.joinpath("stage1_final.ckpt")
@@ -194,27 +279,7 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
                 f"No model or ema_model state was found in Stage-1 checkpoint {stage1_path}."
             )
         self.teacher_model.load_state_dict(teacher_state, strict=True)
-        self._resume_teacher_restored = True
         logger.info(f"Restored frozen Stage-1 teacher from {stage1_path}")
-
-    def _prepare_restored_stage2_models(self, accelerator, device):
-        if not self._resume_teacher_restored:
-            raise RuntimeError(
-                "Stage-2 resume requires the frozen Stage-1 teacher, but it was not restored."
-            )
-        if not self._resume_ema_restored:
-            raise RuntimeError(
-                "Stage-2 resume requires the EMA target model, but it was not restored."
-            )
-        self.teacher_model.set_training_stage(2)
-        self.teacher_model.apply_stage_freeze()
-        self.teacher_model.eval()
-        self.teacher_model.requires_grad_(False)
-        self.teacher_model.to(device)
-        self.ema_model.set_training_stage(2)
-        self.ema_model.eval()
-        self.ema_model.requires_grad_(False)
-        logger.info("Preserved frozen teacher and EMA target from Stage-2 checkpoint")
 
     def _preserve_checkpoint_time_condition_layout(self, payload):
         if self.current_stage != 2:
@@ -232,10 +297,11 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
             return
         for policy in (self.model, self.teacher_model, self.ema_model):
             policy.model.time_cond_position = checkpoint_position
+        OmegaConf.update(self.cfg, "policy.model.time_cond_position", checkpoint_position, force_add=True)
         logger.warning(
             "Stage-2 checkpoint was trained with "
             f"time_cond_position={checkpoint_position}; overriding the current "
-            f"setting ({current_position}) to preserve resume semantics."
+            f"setting ({current_position}) to preserve its token positions."
         )
 
     def run(self):
@@ -256,24 +322,10 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
             latest_ckpt_path = self.get_checkpoint_path()
             if latest_ckpt_path.is_file():
                 logger.info(f"Resuming from checkpoint {latest_ckpt_path}")
-                payload = self.load_checkpoint(path=latest_ckpt_path, map_location="cpu")
+                self._resume_training(cfg, accelerator, latest_ckpt_path)
                 resume_checkpoint_path = latest_ckpt_path
-                state_dicts = payload.get("state_dicts", {})
-                self._resume_teacher_restored = "teacher_model" in state_dicts
-                self._resume_ema_restored = "ema_model" in state_dicts
-                self._preserve_checkpoint_time_condition_layout(payload)
-                if self.current_stage == 2 and not self._resume_teacher_restored:
-                    self._restore_stage2_teacher_from_stage1_checkpoint(latest_ckpt_path)
-        self._load_pretrained_if_needed(cfg)
-        if resume_checkpoint_path is not None:
-            self.model.set_training_stage(self.current_stage)
-            self.model.apply_stage_freeze()
-            self.optimizer = self.model.get_optimizer(
-                **self._optimizer_cfg_for_stage(cfg, self.current_stage)
-            )
-            if self.scaler is not None:
-                self.scaler = GradScaler()
-            logger.info(f"Rebuilt optimizer for resumed Stage {self.current_stage}")
+        if resume_checkpoint_path is None:
+            self._load_pretrained_if_needed(cfg)
 
         dataset: BaseImageDataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
@@ -285,26 +337,19 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         train_dataloader = DataLoader(dataset, **dataloader_cfg)
         val_dataloader = DataLoader(val_dataset, **val_dataloader_cfg)
 
-        normalizer = dataset.get_normalizer()
-        self.model.set_normalizer(normalizer)
-        self.teacher_model.set_normalizer(normalizer)
-        self.ema_model.set_normalizer(normalizer)
+        if self.current_stage == 1 or not self.model.normalizer.params_dict:
+            normalizer = dataset.get_normalizer()
+            self.model.set_normalizer(normalizer)
+            self.teacher_model.set_normalizer(normalizer)
+            self.ema_model.set_normalizer(normalizer)
 
         if cfg.training.debug:
-            self.stage1_epochs = min(1, max(0, self.stage1_epochs))
-            self.stage2_epochs = 1
             cfg.training.max_train_steps = 2
             cfg.training.max_val_steps = 2
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
 
-        if self.current_stage == 1:
-            remaining_stage1_epochs = max(0, self.stage1_epochs - self.epoch)
-            stage_schedule = [1] * remaining_stage1_epochs + [2] * self.stage2_epochs
-        else:
-            completed_stage2_epochs = max(0, self.epoch - self.stage1_epochs)
-            remaining_stage2_epochs = max(0, self.stage2_epochs - completed_stage2_epochs)
-            stage_schedule = [2] * remaining_stage2_epochs
+        stage_schedule = self._remaining_stages()
         total_epochs = len(stage_schedule)
 
         current_stage_epochs = stage_schedule.count(self.current_stage)
@@ -335,17 +380,6 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
         device = accelerator.device
         self.teacher_model.to(device)
         self.ema_model.to(device)
-        if self.current_stage == 2:
-            if resume_checkpoint_path is not None:
-                self._prepare_restored_stage2_models(accelerator, device)
-            else:
-                # This path is used when Stage 1 is intentionally skipped after
-                # loading a pretrained teacher/student initialization.
-                self._refresh_teacher_from_model(accelerator, device)
-                self.ema_model.load_state_dict(
-                    accelerator.unwrap_model(self.model).state_dict(),
-                    strict=True,
-                )
 
         log_path = os.path.join(self.output_dir, "logs.json.txt")
         with JsonLogger(log_path) as json_logger:
@@ -444,7 +478,15 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
                         if len(val_losses) > 0:
                             step_log["val_loss"] = float(np.nanmean(val_losses))
 
-                if accelerator.is_main_process and self.epoch % cfg.training.checkpoint_every == 0:
+                accelerator.log(step_log, step=self.global_step)
+                json_logger.log(step_log)
+                self.global_step += 1
+                checkpoint_due = self.epoch % cfg.training.checkpoint_every == 0
+                self.epoch += 1
+                if stage == 2:
+                    self.stage2_epochs_completed += 1
+
+                if accelerator.is_main_process and checkpoint_due:
                     model_ddp = self.model
                     self.model = accelerator.unwrap_model(self.model)
                     if cfg.checkpoint.save_last_ckpt:
@@ -455,17 +497,11 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
                         self.save_checkpoint(path=topk_path)
                     self.model = model_ddp
 
-                accelerator.log(step_log, step=self.global_step)
-                json_logger.log(step_log)
-                self.global_step += 1
-
                 next_stage = stage_schedule[local_epoch_idx + 1] if local_epoch_idx + 1 < total_epochs else None
                 if stage == 1 and next_stage == 2:
-                    self._sync_model_from_ema(accelerator)
-                    self._save_named_checkpoint(accelerator, "stage1_final.ckpt")
-                    self._refresh_teacher_from_model(accelerator, device)
-                    self._reset_ema(ema)
-                    self.ema_model.load_state_dict(accelerator.unwrap_model(self.model).state_dict(), strict=True)
+                    self._start_distillation(accelerator, save_stage1=True)
+                    ema.decay = 0.0
+                    ema.optimization_step = self.ema_optimization_step
                     stage2_dataloader_cfg = dict(dataloader_cfg)
                     stage2_val_dataloader_cfg = dict(val_dataloader_cfg)
                     stage2_dataloader_cfg["pin_memory"] = False
@@ -480,8 +516,6 @@ class TrainDP30HzConsistencyWorkspace(BaseWorkspace):
                         stage=2,
                         stage_epochs=self.stage2_epochs,
                     )
-
-                self.epoch += 1
 
         if accelerator.is_main_process:
             model_ddp = self.model

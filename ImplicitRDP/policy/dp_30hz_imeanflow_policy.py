@@ -115,6 +115,19 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
     def reset(self):
         pass
 
+    def validate_reactive_window(self, stream: str, update_interval: int, latency: int):
+        if update_interval < 1 or latency < 0 or self.action_start_30hz < 0:
+            raise ValueError(
+                f"{stream} requires a positive update interval and nonnegative latency and action start."
+            )
+        available = min(self.n_action_steps, self.action_horizon - self.action_start_30hz)
+        if latency + update_interval > available:
+            raise ValueError(
+                f"{stream} needs {latency + update_interval} action steps "
+                f"(latency {latency} + update interval {update_interval}), "
+                f"but the policy's executable window is {available} steps."
+            )
+
     def get_temporal_cond(
         self,
         extended_obs_dict: Optional[Dict[str, torch.Tensor]],
@@ -132,14 +145,25 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
         obs = extended_obs_dict[key]
         if extended_obs_last_step is not None:
             obs = obs[:, -extended_obs_last_step:, ...]
-        if extend_obs_pad_after_n is not None:
-            padding_obs = obs[:, -1:, ...].repeat(1, extend_obs_pad_after_n, 1)
-            obs = torch.cat([padding_obs, obs], dim=-2)
+        if extend_obs_pad_after_n:
+            padding_obs = obs[:, -1:, :].expand(-1, extend_obs_pad_after_n, -1)
+            obs = torch.cat([obs, padding_obs], dim=1)
 
         obs = self.normalizer[f"extended_{key}"].normalize(obs)
         if post_process:
             obs = self.rnn_obs_encoder(obs)
         return obs
+
+    def _trajectory_temporal_cond(self, extended_obs_dict, steps):
+        if extended_obs_dict is None or self.rnn_obs_encoder is None:
+            return None
+        available = extended_obs_dict[self.highfreq_extended_obs_key].shape[1]
+        if available == 0:
+            raise ValueError("At least one wrench sample is required for temporal conditioning.")
+        return self.get_temporal_cond(
+            extended_obs_dict, extended_obs_last_step=steps,
+            extend_obs_pad_after_n=max(0, steps - available), post_process=True,
+        )
 
     def _predict_obs_tokens(
         self,
@@ -155,12 +179,8 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
         if len(obs_tokens.shape) == 2:
             obs_tokens = obs_tokens.reshape(B, -1, *obs_tokens.shape[1:])
 
-        temporal_cond = None
-        if self.rnn_obs_encoder is not None and extended_obs_dict is not None:
-            temporal_cond = self.get_temporal_cond(extended_obs_dict, post_process=True)
-
         if return_temporal_cond:
-            return obs_tokens, temporal_cond
+            return obs_tokens, self._trajectory_temporal_cond(extended_obs_dict, self.action_horizon)
         return obs_tokens
 
     def predict_obs_tokens(
@@ -182,20 +202,7 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
         nactions = self.normalizer[self.action_normalizer_key].normalize(actions)
         obs_tokens = self._predict_obs_tokens(batch["obs"])
 
-        extended_obs_dict = batch.get("extended_obs", None)
-        if extended_obs_dict is not None and self.rnn_obs_encoder is not None:
-            first_val = extended_obs_dict[self.highfreq_extended_obs_key]
-            t_extended = first_val.shape[1]
-            t_action = actions.shape[1]
-            extend_pad_n = t_action - t_extended if t_action > t_extended else None
-            temporal_cond = self.get_temporal_cond(
-                extended_obs_dict,
-                extended_obs_last_step=t_action,
-                extend_obs_pad_after_n=extend_pad_n,
-                post_process=True,
-            )
-        else:
-            temporal_cond = None
+        temporal_cond = self._trajectory_temporal_cond(batch.get("extended_obs"), actions.shape[1])
         return obs_tokens, nactions, temporal_cond
 
     def _sample_tr(self, batch_size: int, device: torch.device, dtype: torch.dtype):
@@ -329,7 +336,8 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
             num_inference_steps=num_inference_steps,
         )
         action_pred = self.normalizer[self.action_normalizer_key].unnormalize(nsample)
-        action = action_pred[:, self.action_start_30hz:self.action_horizon]
+        start = self.action_start_30hz
+        action = action_pred[:, start:start + self.n_action_steps]
         return action, action_pred
 
     def predict_action(
@@ -376,7 +384,7 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
     def _predict_from_obs_tokens_and_noisy_trajectory(
         self,
         obs_tokens_and_noisy_trajectory_list: List[torch.Tensor],
-        extended_obs_dict: Union[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]],
+        extended_obs_dict: Optional[Union[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]]],
         extended_obs_last_step_list: List[int],
         dataset_obs_temporal_downsample_ratio: int,
         extend_obs_pad_after: bool = False,
@@ -390,42 +398,28 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
             B, self.action_horizon, self.action_dim
         )
 
-        max_last_step = max(extended_obs_last_step_list)
-        pad_after_n = self.action_horizon - max_last_step if extend_obs_pad_after else None
-        if isinstance(extended_obs_dict, list):
-            temporal_cond = [
-                self.get_temporal_cond(
-                    item,
-                    extended_obs_last_step=max_last_step,
-                    extend_obs_pad_after_n=pad_after_n,
-                    post_process=True,
-                )
-                for item in extended_obs_dict
+        lengths = extended_obs_last_step_list
+        if len(lengths) != B or any(n < 1 or n > self.action_horizon for n in lengths):
+            raise ValueError(f"Expected one history length in [1, {self.action_horizon}] per request.")
+        sample_steps = self.action_horizon if extend_obs_pad_after else max(lengths)
+        temporal_cond = None
+        if self.rnn_obs_encoder is not None and extended_obs_dict is not None:
+            key = self.highfreq_extended_obs_key
+            if isinstance(extended_obs_dict, list):
+                histories = [item[key] for item in extended_obs_dict]
+            else:
+                histories = list(extended_obs_dict[key].expand(B, -1, -1).split(1))
+            if len(histories) != B or any(h.shape[0] != 1 or h.shape[1] == 0 for h in histories):
+                raise ValueError("Expected one nonempty wrench history per request.")
+            lengths = [min(n, history.shape[1]) for n, history in zip(lengths, histories)]
+            # Each cached trajectory starts its own GRU history. Select its
+            # suffix before encoding so older readings cannot enter its state.
+            windows = [
+                self.get_temporal_cond({key: history}, n, sample_steps - n)
+                for history, n in zip(histories, lengths)
             ]
-        else:
-            temporal_cond = self.get_temporal_cond(
-                extended_obs_dict,
-                extended_obs_last_step=max_last_step,
-                extend_obs_pad_after_n=pad_after_n,
-                post_process=True,
-            )
-
-        temporal_cond_list = []
-        for i in range(B):
-            source = temporal_cond[i] if isinstance(temporal_cond, list) else temporal_cond
-            if extended_obs_last_step_list[i] < max_last_step:
-                padding_obs = source[:, -1:, :].repeat(
-                    1,
-                    max_last_step - extended_obs_last_step_list[i],
-                    1,
-                )
-                source = torch.cat(
-                    [source[:, -extended_obs_last_step_list[i]:, :], padding_obs],
-                    dim=-2,
-                )
-            temporal_cond_list.append(source)
-        temporal_cond = torch.cat(temporal_cond_list, dim=0)
-        noisy_trajectory = noisy_trajectory[:, :temporal_cond.shape[1], :]
+            temporal_cond = self.rnn_obs_encoder(torch.cat(windows, dim=0))
+        noisy_trajectory = noisy_trajectory[:, :sample_steps]
 
         action, action_pred = self._predict_action_from_tokens(
             obs_tokens,
@@ -435,16 +429,12 @@ class DP30HziMeanFlowPolicy(BaseImagePolicy):
 
         results = []
         start = self.action_start_30hz
-        end = self.action_horizon
-        for i in range(B):
-            if extend_obs_pad_after:
-                results.append({"action": action[i:i + 1], "action_pred": action_pred[i:i + 1]})
-            else:
-                valid_len = max(0, min(extended_obs_last_step_list[i] - start, end - start))
-                results.append({
-                    "action": action[i:i + 1, :valid_len, :],
-                    "action_pred": action_pred[i:i + 1, :extended_obs_last_step_list[i], :],
-                })
+        for i, length in enumerate(lengths):
+            valid_steps = sample_steps if extend_obs_pad_after else length
+            results.append({
+                "action": action[i:i + 1, :max(0, valid_steps - start)],
+                "action_pred": action_pred[i:i + 1, :valid_steps],
+            })
         return results
 
     def predict_from_obs_tokens_and_noisy_trajectory(self, *args, **kwargs):

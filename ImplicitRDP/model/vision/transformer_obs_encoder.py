@@ -14,6 +14,18 @@ from ImplicitRDP.common.pytorch_util import replace_submodules
 
 logger = logging.getLogger(__name__)
 
+def _eval_image_transform(image, transforms):
+    """Keep the training crop geometry and normalization during evaluation."""
+    if not isinstance(transforms, nn.Sequential):
+        return transforms(image)
+    for transform in transforms:
+        if isinstance(transform, torchvision.transforms.RandomCrop):
+            image = torchvision.transforms.functional.center_crop(image, transform.size)
+        elif not isinstance(transform, (torchvision.transforms.RandomRotation, torchvision.transforms.ColorJitter)):
+            image = transform(image)
+    return image
+
+
 class AttentionPool2d(nn.Module):
     def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
         super().__init__()
@@ -284,7 +296,8 @@ class TransformerObsEncoder(ModuleAttrMixin):
             assert BT == batch_size * self.obs_horizon
             B = BT // self.obs_horizon
             assert img.shape[1:] == self.key_shape_map[key]
-            img = self.key_transform_map[key](img)
+            transform = self.key_transform_map[key]
+            img = transform(img) if self.training else _eval_image_transform(img, transform)
             raw_feature = self.key_model_map[key](img)
             feature = self.aggregate_feature(raw_feature)
             emb = self.key_projection_map[key](feature)

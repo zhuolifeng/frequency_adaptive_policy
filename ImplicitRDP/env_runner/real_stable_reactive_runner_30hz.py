@@ -14,6 +14,7 @@ from omegaconf import DictConfig, ListConfig
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFreqCD30HzConfidencePolicy
+from ImplicitRDP.policy.dp_30hz_imeanflow_policy import DP30HziMeanFlowPolicy
 from ImplicitRDP.policy.act_30hz_policy import ACT30HzPolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
@@ -711,13 +712,17 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, ACT30HzPolicy, DPMultiFreqCD30HzConfidencePolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, ACT30HzPolicy,
+                          DPMultiFreqCD30HzConfidencePolicy, DP30HziMeanFlowPolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:
             assert not hasattr(policy, 'at') or not policy.at.use_rnn_decoder, "Policy should not use rnn decoder for action."
 
         if self.use_reactive_transformer:
+            if isinstance(policy, DP30HziMeanFlowPolicy):
+                policy.validate_reactive_window("TCP", self.tcp_action_update_interval, self.latency_step)
+                policy.validate_reactive_window("gripper", self.gripper_action_update_interval, self.gripper_latency_step)
             assert (
                 getattr(policy, 'rnn_obs_encoder', None) is not None
                 or getattr(policy, 'rnn_obs_encoder_act', None) is not None

@@ -23,7 +23,7 @@ python train.py --config-name=train_dp_30hz_imeanflow_workspace \
     task=real_dual_switch_image_wrench_offline_10fps_30hz --cfg job --resolve
 ```
 
-The CPU tests train and validate a reduced iMeanFlow model on two synthetic episodes, save a checkpoint, and check replay-buffer I/O, camera image resizing and mocked robot connections. Run them from the repository root.
+The CPU tests train and validate reduced iMeanFlow and consistency models on two synthetic episodes. They reload both the consistency teacher and student checkpoints and check the loss, action windows, image preprocessing, replay-buffer I/O and mocked robot connections. Run them from the repository root.
 
 ```bash
 python -m pip install pytest
@@ -57,14 +57,22 @@ export GPU_ID=0
 | --- | --- | --- |
 | Frequency-adaptive diffusion | `bash train_dp_multifreq_cd_30hz_confidence.sh` | Fits the diffusion backbone, trains the confidence predictor, then distills the 30 Hz head. Set `STAGE2_DATASET_PATH` to use separate calibration data. |
 | 30 Hz iMeanFlow | `bash train_dp_30hz_imeanflow.sh` | Learns a flow model with one inference step by default. |
-| 30 Hz consistency | `bash train_dp_30hz_consistency.sh` | Trains the base model and then the consistency model. |
+| 30 Hz consistency | `bash train_dp_30hz_consistency.sh` | Trains an EDM teacher and distills a CTM student. |
 | 30 Hz ACT | `bash train_act_30hz.sh` | Trains a transformer to predict an action sequence. |
 
 Use one GPU to reproduce these examples. The launcher accepts multiple GPU IDs, but some workspaces compute losses on an unwrapped model and distributed gradient synchronization is unverified.
 
 Hydra writes runs under `data/outputs/<date>/`. Checkpoints live in the run's `checkpoints/` directory. To adjust the batch size, append Hydra overrides such as `dataloader.batch_size=8 val_dataloader.batch_size=8`. [Workspace configurations](ImplicitRDP/config)
 
+The 30 Hz iMeanFlow policy uses its instantaneous-velocity head to compute the training loss and its average-velocity head to generate actions. [iMeanFlow reference implementation](https://github.com/Lyy-iiis/imeanflow/blob/main/imf.py)
+
+The 30 Hz consistency policy uses the trajectory-level pseudo-Huber loss from equation 4. To reproduce the previous loss, append `consistency.pseudo_huber_mode=legacy` to the training command. To start distillation from an existing teacher, set `STAGE1_EPOCHS=0` and `PRETRAINED_CKPT_PATH=/path/to/stage1_final.ckpt`. [Consistency Policy paper](https://www.roboticsproceedings.org/rss20/p071.pdf#page=3)
+
+New consistency checkpoints record completed epochs for each training run and track completed student epochs separately. Resuming an older periodic checkpoint can repeat its last epoch because that format saved the epoch index before incrementing it.
+
 ## Evaluate
+
+For the 30 Hz consistency policy, the checkpoint stage selects the sampler. The teacher in `stage1_final.ckpt` uses 39 Heun intervals by default, with two model calls per interval. The distilled stage-2 student uses one model call by default. Use `consistency.teacher_num_inference_steps` to change the teacher's interval count and `consistency.num_inference_steps` to change the student's sampling steps.
 
 To evaluate a trained frequency-adaptive checkpoint on recorded demonstrations, set the path to a checkpoint from the corresponding workspace. This example evaluates the full store specified by `DATASET_PATH`. For held-out results, point it to a separate evaluation store.
 
@@ -76,6 +84,8 @@ CKPT_PATH=/path/to/checkpoints/latest.ckpt TRAINING_STAGE=auto \
 The evaluator scores both frequencies against the corresponding demonstration actions. It writes per-episode mean squared errors for the first six action dimensions to `all_episodes_metrics.json` alongside the generated videos. Use the same task, prediction type and loss type as the training run. [Offline evaluator](eval_dp_multifreq_cd_30hz_confidence.py)
 
 For live evaluation or recording, configure the robot and cameras on the deployment workstation first. The deployment guide covers ROS 2, calibration, service startup and selecting a trained checkpoint. [Deployment guide](docs/customized_deployment_guide.md) · [Data collection tips](docs/data_collection_tips.md)
+
+For live 30 Hz iMeanFlow and consistency runs, each stream's latency plus its action update interval must fit within `min(n_action_steps_30hz, policy_horizon_30hz - action_start_30hz)`. All quantities are in 30 Hz steps. For example, an eight-step window with two steps of latency allows an update interval of up to six steps. The runner checks the TCP and gripper settings independently before starting.
 
 ## License and attribution
 

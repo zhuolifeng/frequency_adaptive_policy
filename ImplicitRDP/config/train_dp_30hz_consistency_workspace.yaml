@@ -35,12 +35,16 @@ consistency:
   dsm_karras_ramp_max: 0.7
   clamp_log_normal_sigmas: False
   delta: -1.0
+  # "legacy" reproduces the elementwise loss in the original release.
+  pseudo_huber_mode: trajectory
   initial_noise_scale: 1.0
   clip_sample: True
   clip_sample_min: -1.0
   clip_sample_max: 1.0
   chaining_indices: null
   num_inference_steps: 1
+  # Stage 1 defaults to one Heun interval between adjacent Karras noise levels.
+  teacher_num_inference_steps: null
 
 policy:
   _target_: ImplicitRDP.policy.dp_30hz_consistency_policy.DP30HzConsistencyPolicy
@@ -101,6 +105,7 @@ policy:
   action_normalizer_key: action_stack
   action_train_key: action_stack
   num_inference_steps: ${consistency.num_inference_steps}
+  teacher_num_inference_steps: ${consistency.teacher_num_inference_steps}
   sigma_data: ${consistency.sigma_data}
   sigma_min: ${consistency.sigma_min}
   sigma_max: ${consistency.sigma_max}
@@ -116,6 +121,7 @@ policy:
   dsm_karras_ramp_max: ${consistency.dsm_karras_ramp_max}
   clamp_log_normal_sigmas: ${consistency.clamp_log_normal_sigmas}
   delta: ${consistency.delta}
+  pseudo_huber_mode: ${consistency.pseudo_huber_mode}
   initial_noise_scale: ${consistency.initial_noise_scale}
   clip_sample: ${consistency.clip_sample}
   clip_sample_min: ${consistency.clip_sample_min}

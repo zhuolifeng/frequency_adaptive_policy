@@ -2,8 +2,6 @@ import math
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
-from einops import reduce
 from loguru import logger
 
 from ImplicitRDP.policy.dp_30hz_imeanflow_policy import DP30HziMeanFlowPolicy
@@ -50,6 +48,8 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         clip_sample_max: float = 1.0,
         chaining_indices: Optional[Tuple[int, ...]] = None,
         training_stage: int = 1,
+        teacher_num_inference_steps: Optional[int] = None,
+        pseudo_huber_mode: str = "trajectory",
         **kwargs,
     ):
         super().__init__(
@@ -87,6 +87,10 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         self.dsm_karras_ramp_max = float(dsm_karras_ramp_max)
         self.clamp_log_normal_sigmas = bool(clamp_log_normal_sigmas)
         self.delta = float(delta)
+        self.pseudo_huber_mode = pseudo_huber_mode
+        self.teacher_num_inference_steps = (
+            self.num_scales - 1 if teacher_num_inference_steps is None else int(teacher_num_inference_steps)
+        )
         self.initial_noise_scale = float(initial_noise_scale)
         self.clip_sample = bool(clip_sample)
         self.clip_sample_min = float(clip_sample_min)
@@ -96,6 +100,12 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         )
         if self.num_scales < 2:
             raise ValueError(f"num_scales must be at least 2, got {self.num_scales}.")
+        if self.teacher_num_inference_steps < 1:
+            raise ValueError("teacher_num_inference_steps must be positive.")
+        if pseudo_huber_mode not in ("trajectory", "legacy"):
+            raise ValueError("pseudo_huber_mode must be 'trajectory' or 'legacy'.")
+        if self.delta < 0 and self.delta != -1:
+            raise ValueError("delta must be non-negative or -1 for automatic scaling.")
         if not 0.0 <= self.dsm_karras_proportion <= 1.0:
             raise ValueError(
                 "dsm_karras_proportion must be in [0, 1], "
@@ -127,6 +137,10 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         if stage not in (1, 2):
             raise ValueError(f"Invalid training_stage={stage}; expected 1 or 2.")
         self.training_stage = int(stage)
+
+    @property
+    def active_num_inference_steps(self):
+        return self.teacher_num_inference_steps if self.training_stage == 1 else self.num_inference_steps
 
     def _set_module_trainable(self, module, trainable: bool):
         if module is None:
@@ -184,20 +198,18 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         raise NotImplementedError(f"Unsupported weight_schedule={self.weight_schedule}")
 
     def _pseudo_huber_per_sample(self, pred: torch.Tensor, target: torch.Tensor):
-        squared_error = F.mse_loss(pred, target, reduction="none")
-        if self.delta == -1:
-            delta = torch.as_tensor(
-                math.sqrt(math.prod(pred.shape[1:])) * 0.00054,
-                device=pred.device,
-                dtype=pred.dtype,
-            )
-        else:
-            delta = torch.as_tensor(self.delta, device=pred.device, dtype=pred.dtype)
+        residual = (pred - target).flatten(start_dim=1)
+        if residual.dtype in (torch.float16, torch.bfloat16):
+            residual = residual.float()
+        squared_error = residual.square()
         if self.delta == 0:
-            loss = squared_error
-        else:
-            loss = torch.sqrt(squared_error ** 2 + delta ** 2) - delta
-        return reduce(loss, "b ... -> b", "mean")
+            return squared_error.mean(dim=1)
+        delta = 0.00054 * math.sqrt(residual.shape[1]) if self.delta == -1 else self.delta
+        if self.pseudo_huber_mode == "legacy":
+            return (torch.sqrt(squared_error.square() + delta ** 2) - delta).mean(dim=1)
+        # Eq. 4 of Consistency Policy, rationalized to preserve small residuals.
+        squared_norm = squared_error.sum(dim=1)
+        return squared_norm / (torch.sqrt(squared_norm + delta ** 2) + delta)
 
     def _sample_log_normal_sigmas(
         self,
@@ -349,7 +361,7 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
         return t, t2
 
     @torch.no_grad()
-    def _teacher_denoise_from_sigma(self, teacher_policy, sample, sigmas, obs_tokens, temporal_cond):
+    def _teacher_denoise_from_sigma(self, teacher_policy, sample, sigmas, obs_tokens, temporal_cond, clip=False):
         _, denoised = teacher_policy._cm_denoise(
             teacher_policy,
             sample,
@@ -358,17 +370,17 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
             temporal_cond,
             boundary=True,
         )
-        return denoised
+        return self._clip_inference_sample(denoised) if clip else denoised
 
     @torch.no_grad()
-    def _heun_solver(self, samples, t, next_t, obs_tokens, temporal_cond, teacher_policy):
+    def _heun_solver(self, samples, t, next_t, obs_tokens, temporal_cond, teacher_policy, clip=False):
         x = samples
-        denoiser = self._teacher_denoise_from_sigma(teacher_policy, x, t, obs_tokens, temporal_cond)
+        denoiser = self._teacher_denoise_from_sigma(teacher_policy, x, t, obs_tokens, temporal_cond, clip)
         step = self._append_dims(next_t - t, x.ndim)
         mask = (step == 0).to(dtype=x.dtype)
         d = (x - denoiser) / (self._append_dims(t.clamp_min(1e-12), x.ndim) + mask)
         samples = x + d * self._append_dims(next_t - t, x.ndim)
-        denoiser = self._teacher_denoise_from_sigma(teacher_policy, samples, next_t, obs_tokens, temporal_cond)
+        denoiser = self._teacher_denoise_from_sigma(teacher_policy, samples, next_t, obs_tokens, temporal_cond, clip)
         next_d = (samples - denoiser) / (self._append_dims(next_t.clamp_min(1e-12), x.ndim) + mask)
         out = x + (d + next_d) * self._append_dims((next_t - t) / 2, x.ndim)
         return out * (1.0 - mask) + x * mask
@@ -536,8 +548,7 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
 
     def conditional_sample(self, cond, temporal_cond=None, generator=None, num_inference_steps=None, noisy_trajectory=None):
         batch_size = cond.shape[0]
-        steps = self.num_inference_steps if num_inference_steps is None else int(num_inference_steps)
-        steps = max(1, steps)
+        steps = self.active_num_inference_steps if num_inference_steps is None else int(num_inference_steps)
         if noisy_trajectory is None:
             trajectory = torch.randn(
                 (batch_size, self.action_horizon, self.action_dim),
@@ -547,6 +558,19 @@ class DP30HzConsistencyPolicy(DP30HziMeanFlowPolicy):
             ) * self.initial_noise_scale
         else:
             trajectory = noisy_trajectory
+
+        if self.training_stage == 1:
+            if steps < 1:
+                raise ValueError("EDM sampling requires at least one Heun interval.")
+            # The teacher learns a single-time denoiser. Integrate its ODE over
+            # positive Karras noise levels, using two denoiser calls per interval.
+            sigmas = self._get_karras_sigmas(steps + 1, trajectory.device, trajectory.dtype)
+            for sigma, next_sigma in zip(sigmas[:-1], sigmas[1:]):
+                trajectory = self._heun_solver(
+                    trajectory, sigma.expand(batch_size), next_sigma.expand(batch_size),
+                    cond, temporal_cond, self, clip=True,
+                )
+            return trajectory
 
         sigma = torch.full(
             (batch_size,),

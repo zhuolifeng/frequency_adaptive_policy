@@ -125,7 +125,7 @@ def main(cfg):
             f"action_start_10hz={getattr(policy, 'action_start_10hz', None)}, "
             f"action_start_30hz={getattr(policy, 'action_start_30hz', None)}, "
             f"n_action_steps={getattr(policy, 'n_action_steps', None)}, "
-            f"num_inference_steps={policy.num_inference_steps}, "
+            f"num_inference_steps={getattr(policy, 'active_num_inference_steps', policy.num_inference_steps)}, "
             f"training_stage={training_stage}"
         )
     elif isinstance(policy, ACT30HzPolicy):
