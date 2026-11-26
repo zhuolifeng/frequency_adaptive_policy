@@ -1,13 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -eo pipefail
 
-GPU_ID="${GPU_ID:-0,1,2,3,4,5,6,7}"
-MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29506}"
+export MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29506}"
 
 TASK="${TASK:-dual_button}"
 DATASET_VERSION="${DATASET_VERSION:-v2}"
 ROUND="${ROUND:-1}"
-DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
-TASK_CONFIG="real_${TASK}_image_wrench_offline_10fps_30hz"
+export DATASET_PATH="${DATASET_PATH:-data/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+TASK_CONFIG="${TASK_CONFIG:-real_${TASK}_image_wrench_offline_10fps_30hz}"
 SEED="${SEED:-42}"
 
 EXP_NAME="${EXP_NAME:-dp_30hz_consistency}"
@@ -39,16 +39,13 @@ USE_AMP_FOR_POLICY="${USE_AMP_FOR_POLICY:-False}"
 AMP_DTYPE_FOR_POLICY="${AMP_DTYPE_FOR_POLICY:-bf16}"
 TRAINING_DEBUG="${TRAINING_DEBUG:-False}"
 RESUME="${RESUME:-False}"
-PRETRAINED_CKPT_PATH="${PRETRAINED_CKPT_PATH:-null}"
+# Quote the checkpoint for Hydra, including names such as epoch=0100.ckpt.
+pretrained_override=null
+if [[ -n "${PRETRAINED_CKPT_PATH:-}" && "$PRETRAINED_CKPT_PATH" != null ]]; then
+    pretrained_override='${oc.env:PRETRAINED_CKPT_PATH}'
+fi
 LOGGING_BACKEND="${LOGGING_BACKEND:-tensorboard}"
 LOGGING_MODE="${LOGGING_MODE:-online}"
-
-IFS=',' read -r -a GPU_ARRAY <<< "${GPU_ID}"
-NUM_PROCESSES="${NUM_PROCESSES:-${#GPU_ARRAY[@]}}"
-ACCELERATE_ARGS=(--main_process_port "${MAIN_PROCESS_PORT}")
-if [ "${NUM_PROCESSES}" -gt 1 ]; then
-    ACCELERATE_ARGS=(--multi_gpu --num_processes "${NUM_PROCESSES}" "${ACCELERATE_ARGS[@]}")
-fi
 
 echo "=========================================="
 echo "DP 30Hz Consistency Training"
@@ -62,41 +59,39 @@ echo "  CTM ODE steps:     ${CTM_ODE_STEPS_MAX}"
 echo "  Weights CM/DSM:    ${CONSISTENCY_WEIGHT}/${DSM_WEIGHT}"
 echo "=========================================="
 
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch "${ACCELERATE_ARGS[@]}" train.py \
+bash ./launch_training.sh \
     --config-name=train_dp_30hz_consistency_workspace \
-    task=${TASK_CONFIG} \
-    task.dataset_path="${DATASET_PATH}" \
-    task.name="${POLICY_TASK_NAME}" \
-    exp_name="${EXP_NAME}" \
-    training.seed="${SEED}" \
-    training.stage1_epochs=${STAGE1_EPOCHS} \
-    training.stage2_epochs=${STAGE2_EPOCHS} \
-    training.num_epochs=${NUM_EPOCHS} \
-    training.pretrained_ckpt_path=${PRETRAINED_CKPT_PATH} \
-    training.use_amp=${USE_AMP_FOR_POLICY} \
-    training.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
-    training.debug=${TRAINING_DEBUG} \
-    training.resume=${RESUME} \
-    optimizer.stage1_lr=${STAGE1_LR} \
-    optimizer.stage1_obs_encoder_lr=${STAGE1_OBS_ENCODER_LR} \
-    optimizer.stage2_lr=${STAGE2_LR} \
-    policy.use_amp_for_inference=${USE_AMP_FOR_POLICY} \
-    policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
-    consistency.num_inference_steps=${CONSISTENCY_NUM_INFERENCE_STEPS} \
-    consistency.sigma_data=${SIGMA_DATA} \
-    consistency.sigma_min=${SIGMA_MIN} \
-    consistency.sigma_max=${SIGMA_MAX} \
-    consistency.rho=${RHO} \
-    consistency.num_scales=${NUM_SCALES} \
-    consistency.ctm_ode_steps_max=${CTM_ODE_STEPS_MAX} \
-    consistency.weight_schedule=${WEIGHT_SCHEDULE} \
-    consistency.consistency_weight=${CONSISTENCY_WEIGHT} \
-    consistency.dsm_weight=${DSM_WEIGHT} \
-    consistency.sigma_sample_p_mean=${SIGMA_SAMPLE_P_MEAN} \
-    consistency.sigma_sample_p_std=${SIGMA_SAMPLE_P_STD} \
-    consistency.delta=${DELTA} \
-    logging.backend=${LOGGING_BACKEND} \
-    logging.mode=${LOGGING_MODE} \
+    "task=${TASK_CONFIG}" \
+    'task.dataset_path=${oc.env:DATASET_PATH}' \
+    "task.name=${POLICY_TASK_NAME}" \
+    "exp_name=${EXP_NAME}" \
+    "training.seed=${SEED}" \
+    "training.stage1_epochs=${STAGE1_EPOCHS}" \
+    "training.stage2_epochs=${STAGE2_EPOCHS}" \
+    "training.num_epochs=${NUM_EPOCHS}" \
+    "training.pretrained_ckpt_path=$pretrained_override" \
+    "training.use_amp=${USE_AMP_FOR_POLICY}" \
+    "training.amp_dtype=${AMP_DTYPE_FOR_POLICY}" \
+    "training.debug=${TRAINING_DEBUG}" \
+    "training.resume=${RESUME}" \
+    "optimizer.stage1_lr=${STAGE1_LR}" \
+    "optimizer.stage1_obs_encoder_lr=${STAGE1_OBS_ENCODER_LR}" \
+    "optimizer.stage2_lr=${STAGE2_LR}" \
+    "policy.use_amp_for_inference=${USE_AMP_FOR_POLICY}" \
+    "policy.amp_dtype=${AMP_DTYPE_FOR_POLICY}" \
+    "consistency.num_inference_steps=${CONSISTENCY_NUM_INFERENCE_STEPS}" \
+    "consistency.sigma_data=${SIGMA_DATA}" \
+    "consistency.sigma_min=${SIGMA_MIN}" \
+    "consistency.sigma_max=${SIGMA_MAX}" \
+    "consistency.rho=${RHO}" \
+    "consistency.num_scales=${NUM_SCALES}" \
+    "consistency.ctm_ode_steps_max=${CTM_ODE_STEPS_MAX}" \
+    "consistency.weight_schedule=${WEIGHT_SCHEDULE}" \
+    "consistency.consistency_weight=${CONSISTENCY_WEIGHT}" \
+    "consistency.dsm_weight=${DSM_WEIGHT}" \
+    "consistency.sigma_sample_p_mean=${SIGMA_SAMPLE_P_MEAN}" \
+    "consistency.sigma_sample_p_std=${SIGMA_SAMPLE_P_STD}" \
+    "consistency.delta=${DELTA}" \
+    "logging.backend=${LOGGING_BACKEND}" \
+    "logging.mode=${LOGGING_MODE}" \
     "$@"
-
-exit 0

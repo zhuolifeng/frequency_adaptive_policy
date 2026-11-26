@@ -1,35 +1,28 @@
-"""
-Usage:
-Training:
-python train.py --config-name=train_diffusion_lowdim_workspace
-"""
+"""Train a policy using one of the workspace configs in ImplicitRDP/config."""
 
+import pathlib
 import sys
-# use line-buffering for both stdout and stderr
-sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
-sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 
 import hydra
-from omegaconf import OmegaConf
-import pathlib
-from ImplicitRDP.workspace.base_workspace import BaseWorkspace
+from omegaconf import DictConfig, OmegaConf
 
-# allows arbitrary python code execution in configs using the ${eval:''} resolver
+
+# Workspace configs use this resolver for arithmetic on horizons and step counts.
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
 
 @hydra.main(
     version_base=None,
-    config_path=str(pathlib.Path(__file__).parent.joinpath(
-        'ImplicitRDP','config'))
+    config_path=str(pathlib.Path(__file__).parent / "ImplicitRDP" / "config"),
 )
-def main(cfg: OmegaConf):
-    # resolve immediately so all the ${now:} resolvers
-    # will use the same time.
+def main(cfg: DictConfig):
+    # Resolve timestamps once so all output paths agree.
     OmegaConf.resolve(cfg)
+    workspace_class = hydra.utils.get_class(cfg._target_)
+    workspace_class(cfg).run()
 
-    cls = hydra.utils.get_class(cfg._target_)
-    workspace: BaseWorkspace = cls(cfg)
-    workspace.run()
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     main()

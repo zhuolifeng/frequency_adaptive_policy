@@ -250,8 +250,7 @@ if __name__ == '__main__':
     FRAME_SPEED = 0
     TRIGGER = 0
     RESOLUTION_PRESET = 0
-    # SAVE_PATH_BASE = '/home/xuehan/Desktop/PhoXiCameraCPP/ExternalCamera/Data'
-    SAVE_PATH_BASE = '/home/xuehan/Desktop/CoRL_vis'
+    SAVE_PATH_BASE = os.environ.get("CAMERA_OUTPUT_DIR", "data/camera_captures")
     os.makedirs(SAVE_PATH_BASE, exist_ok=True)
 
     cam_sys = vCameraSystem(exposure_ms=EXPOSURE_MS,

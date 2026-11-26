@@ -1,11 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -eo pipefail
 
-GPU_ID="${GPU_ID:-0,1,2,3}"
 TASK="${TASK:-dual_switch}"
 DATASET_VERSION="${DATASET_VERSION:-v8}"
 ROUND="${ROUND:-1}"
 TASK_CONFIG="${TASK_CONFIG:-real_${TASK}_image_wrench_offline_10fps_30hz}"
-DATASET_PATH="${DATASET_PATH:-/inspire/hdd/project/robot-dna/baojiachun-CZXS25130063/lifeng/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
+export DATASET_PATH="${DATASET_PATH:-data/${TASK}_${DATASET_VERSION}_round_${ROUND}_zarr}"
 
 POLICY_TASK_NAME="${POLICY_TASK_NAME:-${TASK}_${DATASET_VERSION}_act_30hz}"
 USE_AMP_FOR_POLICY="${USE_AMP_FOR_POLICY:-False}"
@@ -25,19 +25,18 @@ echo "  Epochs:  ${NUM_EPOCHS}"
 echo "  LR:      ${POLICY_LR}"
 echo "=========================================="
 
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch --main_process_port 29502 train.py \
+MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29502}" bash ./launch_training.sh \
     --config-name=train_act_30hz_workspace \
-    task=${TASK_CONFIG} \
-    task.dataset_path=${DATASET_PATH} \
-    task.name=${POLICY_TASK_NAME} \
-    policy.use_amp_for_inference=${USE_AMP_FOR_POLICY} \
-    policy.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
-    training.num_epochs=${NUM_EPOCHS} \
-    training.use_amp=${USE_AMP_FOR_POLICY} \
-    training.amp_dtype=${AMP_DTYPE_FOR_POLICY} \
-    training.debug=${TRAINING_DEBUG} \
-    optimizer.lr=${POLICY_LR} \
-    logging.backend=${LOGGING_BACKEND} \
-    logging.mode=${LOGGING_MODE}
-
-exit 0
+    "task=${TASK_CONFIG}" \
+    'task.dataset_path=${oc.env:DATASET_PATH}' \
+    "task.name=${POLICY_TASK_NAME}" \
+    "policy.use_amp_for_inference=${USE_AMP_FOR_POLICY}" \
+    "policy.amp_dtype=${AMP_DTYPE_FOR_POLICY}" \
+    "training.num_epochs=${NUM_EPOCHS}" \
+    "training.use_amp=${USE_AMP_FOR_POLICY}" \
+    "training.amp_dtype=${AMP_DTYPE_FOR_POLICY}" \
+    "training.debug=${TRAINING_DEBUG}" \
+    "optimizer.lr=${POLICY_LR}" \
+    "logging.backend=${LOGGING_BACKEND}" \
+    "logging.mode=${LOGGING_MODE}" \
+    "$@"

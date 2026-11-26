@@ -1,62 +1,25 @@
-import sys
-import os
-
-ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
-sys.path.append(ROOT_DIR)
-os.chdir(ROOT_DIR)
-
+import numpy as np
+import pytest
 import zarr
+
 from ImplicitRDP.common.replay_buffer import ReplayBuffer
 
-def test():
-    import numpy as np
-    buff = ReplayBuffer.create_empty_numpy()
-    buff.add_episode({
-        'obs': np.zeros((100,10), dtype=np.float16)
-    })
-    buff.add_episode({
-        'obs': np.ones((50,10)),
-        'action': np.ones((50,2))
-    })
-    # buff.rechunk(256)
-    obs = buff.get_episode(0)
 
-    import numpy as np
-    buff = ReplayBuffer.create_empty_zarr()
-    buff.add_episode({
-        'obs': np.zeros((100,10), dtype=np.float16)
-    })
-    buff.add_episode({
-        'obs': np.ones((50,10)),
-        'action': np.ones((50,2))
-    })
-    obs = buff.get_episode(0)
-    buff.set_chunks({
-        'obs': (100,10),
-        'action': (100,2)
-    })
+@pytest.mark.parametrize("create", [ReplayBuffer.create_empty_numpy, ReplayBuffer.create_empty_zarr])
+def test_episode_round_trip(create, tmp_path):
+    buffer = create()
+    first_obs = np.zeros((6, 3), dtype=np.float32)
+    second_obs = np.ones((4, 3), dtype=np.float32)
+    buffer.add_episode({"obs": first_obs})
+    buffer.add_episode({"obs": second_obs, "action": np.ones((4, 2))})
+    if buffer.backend == "zarr":
+        buffer.set_chunks({"obs": (4, 3), "action": (4, 2)})
+        assert buffer.data["obs"].chunks == (4, 3)
 
-
-def test_real():
-    import os
-    dist_group = zarr.open(
-        os.path.expanduser('~/dev/diffusion_policy/data/pusht/pusht_cchi_v2.zarr'), 'r')
-
-    buff = ReplayBuffer.create_empty_numpy()
-    key, group = next(iter(dist_group.items()))
-    for key, group in dist_group.items():
-        buff.add_episode(group)
-
-    # out_path = os.path.expanduser('~/dev/diffusion_policy/data/pusht_cchi2_v2_replay.zarr')
-    out_path = os.path.expanduser('~/dev/diffusion_policy/data/test.zarr')
-    out_store = zarr.DirectoryStore(out_path)
-    buff.save_to_store(out_store)
-
-    buff = ReplayBuffer.copy_from_path(out_path, store=zarr.MemoryStore())
-    buff.pop_episode()
-
-
-def test_pop():
-    buff = ReplayBuffer.create_from_path(
-        '/home/chengchi/dev/diffusion_policy/data/pusht_cchi_v3_replay.zarr',
-        mode='rw')
+    path = str(tmp_path / "episodes.zarr")
+    buffer.save_to_path(path)
+    restored = ReplayBuffer.copy_from_path(path, store=zarr.MemoryStore())
+    np.testing.assert_array_equal(restored.episode_ends[:], [6, 10])
+    np.testing.assert_array_equal(restored.pop_episode()["obs"], second_obs)
+    np.testing.assert_array_equal(restored.get_episode(0)["obs"], first_obs)
+    assert restored.n_episodes == 1

@@ -1,41 +1,9 @@
+"""Benchmark the 10 Hz and 30 Hz samplers of a multi-frequency CD checkpoint.
+
+Set CKPT_PATH and DATASET_PATH, then run python benchmark_inference_time.py.
+Only sampling is timed. Observation encoding and wrench conditioning are
+computed once with the same preprocessing as policy.predict_action().
 """
-FM shortcut multi-frequency inference latency benchmark.
-
-Measures the sampler-only latency for FMMultiFreqShortcutPolicy:
-  1. 50Hz head, 1 shortcut step
-  2. 50Hz head, 2 shortcut steps
-  3. 10Hz head, 5 Euler steps
-  4. 10Hz head, 6 Euler steps
-
-The script precomputes obs_tokens and temporal conditions once, then times only
-policy.conditional_sample(...) for the requested head/step count.
-
-Usage:
-    CKPT_PATH=/path/to/latest.ckpt DATASET_PATH=/path/to/zarr \
-        DEVICE=cuda:0 python benchmark_inference_time.py
-
-Optional environment variables:
-    CKPT_PATH          required checkpoint path
-    DATASET_PATH       override task dataset path
-    TASK               default: dual_switch
-    DATASET_VERSION    default: v6.1
-    ROUND              default: 1
-    DEVICE             default: cuda:0
-    WARMUP_ITERS       default: 50
-    BENCHMARK_ITERS    default: 200
-    USE_AMP            default: 0
-    OUTPUT_DIR         default: <checkpoint_parent>/benchmark_results
-"""
-
-if __name__ == "__main__":
-    import os
-    import pathlib
-    import sys
-
-    ROOT_DIR = str(pathlib.Path(__file__).parent)
-    sys.path.append(ROOT_DIR)
-    os.chdir(ROOT_DIR)
-
 import json
 import os
 import pathlib
@@ -49,18 +17,18 @@ import torch
 from omegaconf import OmegaConf
 from torch.cuda.amp import autocast
 
-from ImplicitRDP.policy.fm_multifreq_shortcut_policy import FMMultiFreqShortcutPolicy
-from ImplicitRDP.workspace.train_fm_multifreq_shortcut_workspace import (
-    TrainFMMultiFreqShortcutWorkspace,
+from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFreqCD30HzConfidencePolicy
+from ImplicitRDP.workspace.train_dp_multifreq_cd_30hz_confidence_workspace import (
+    TrainDPMultiFreqCD30HzConfidenceWorkspace,
 )
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
-def load_policy(cfg, ckpt_path: str) -> FMMultiFreqShortcutPolicy:
-    payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill)
-    workspace = TrainFMMultiFreqShortcutWorkspace(cfg)
-    workspace.load_payload(payload, exclude_keys=["optimizer", "scaler"], strict=False)
+def load_policy(cfg, ckpt_path: str) -> DPMultiFreqCD30HzConfidencePolicy:
+    payload = torch.load(ckpt_path, map_location="cpu", pickle_module=dill)
+    workspace = TrainDPMultiFreqCD30HzConfidenceWorkspace(cfg)
+    workspace.load_payload(payload, exclude_keys=["optimizer", "scaler", "teacher_model"], strict=True)
 
     if cfg.training.use_ema and workspace.ema_model is not None:
         policy = workspace.ema_model
@@ -69,12 +37,13 @@ def load_policy(cfg, ckpt_path: str) -> FMMultiFreqShortcutPolicy:
         policy = workspace.model
         print("  [INFO] Using base model")
 
-    if not isinstance(policy, FMMultiFreqShortcutPolicy):
-        raise TypeError(f"Expected FMMultiFreqShortcutPolicy, got {type(policy)}")
+    if not isinstance(policy, DPMultiFreqCD30HzConfidencePolicy):
+        raise TypeError(f"Expected DPMultiFreqCD30HzConfidencePolicy, got {type(policy)}")
+    policy.set_training_stage(workspace.current_stage)
     return policy
 
 
-def get_real_batch(cfg, dataset, device: torch.device) -> Dict[str, Dict[str, torch.Tensor]]:
+def get_real_batch(dataset, device: torch.device) -> Dict[str, Dict[str, torch.Tensor]]:
     val_dataset = dataset.get_validation_dataset()
     source_dataset = val_dataset if len(val_dataset) > 0 else dataset
     sample = source_dataset[0]
@@ -156,25 +125,30 @@ def print_stats(name: str, latencies: List[float]):
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.joinpath("ImplicitRDP", "config")),
-    config_name="train_fm_multifreq_shortcut_workspace",
+    config_name="train_dp_multifreq_cd_30hz_confidence_workspace",
 )
 def main(cfg):
     ckpt_path = os.environ.get("CKPT_PATH")
     if not ckpt_path:
-        raise ValueError("Set CKPT_PATH to point to an FM shortcut checkpoint")
+        raise ValueError("Set CKPT_PATH to point to a multi-frequency CD checkpoint")
 
     task = os.environ.get("TASK", "dual_switch")
     dataset_version = os.environ.get("DATASET_VERSION", "v6.1")
     round_id = os.environ.get("ROUND", "1")
     dataset_path = os.environ.get(
         "DATASET_PATH",
-        f"/mnt/workspace/users/lifeng/{task}_{dataset_version}_round_{round_id}_zarr",
+        f"data/{task}_{dataset_version}_round_{round_id}_zarr",
     )
 
     warmup_iters = int(os.environ.get("WARMUP_ITERS", "50"))
     benchmark_iters = int(os.environ.get("BENCHMARK_ITERS", "200"))
     device_str = os.environ.get("DEVICE", "cuda:0")
     use_amp = os.environ.get("USE_AMP", "0") == "1"
+
+    if benchmark_iters <= 0 or warmup_iters < 0:
+        raise ValueError("BENCHMARK_ITERS must be positive and WARMUP_ITERS must be nonnegative")
+    if use_amp and torch.device(device_str).type != "cuda":
+        raise ValueError("USE_AMP=1 requires a CUDA device")
 
     cfg.task.dataset_path = dataset_path
     cfg.task.dataset.val_ratio = 0.0
@@ -187,7 +161,7 @@ def main(cfg):
     )
 
     print("=" * 76)
-    print("  FM Shortcut Multi-Frequency Inference Latency Benchmark")
+    print("  Multi-frequency CD Sampler Latency Benchmark")
     print("=" * 76)
     print(f"  Checkpoint:     {ckpt_path}")
     print(f"  Dataset:        {dataset_path}")
@@ -195,7 +169,7 @@ def main(cfg):
     print(f"  AMP:            {'ON (' + str(amp_dtype) + ')' if use_amp else 'OFF'}")
     print(f"  Warmup iters:   {warmup_iters}")
     print(f"  Benchmark iters:{benchmark_iters}")
-    print("  Cases:          50Hz 1/2 steps, 10Hz 5/6 steps")
+    print("  Cases:          30Hz 1/2 steps, 10Hz 5/6 steps")
     print("=" * 76)
 
     print("\n[1/4] Loading dataset...")
@@ -206,26 +180,30 @@ def main(cfg):
     policy.eval().to(device)
 
     print("\n[3/4] Preparing one real sample...")
-    batch = get_real_batch(cfg, dataset, device)
+    batch = get_real_batch(dataset, device)
     obs_dict = batch["obs"]
     extended_obs_dict = batch.get("extended_obs", None)
     if extended_obs_dict is None:
-        raise ValueError("FMMultiFreqShortcutPolicy requires extended_obs")
+        raise ValueError("DPMultiFreqCD30HzConfidencePolicy requires extended_obs")
 
     with torch.no_grad():
         with autocast(enabled=use_amp, dtype=amp_dtype):
             obs_tokens = policy.predict_obs_tokens(obs_dict)
             batch_size = obs_tokens.shape[0]
             obs_tokens = obs_tokens.reshape(batch_size, -1, policy.n_emb)
-            temporal_cond_10hz = policy.get_temporal_cond(extended_obs_dict, head="10hz")
-            temporal_cond_50hz = policy.get_temporal_cond(extended_obs_dict, head="50hz")
+            temporal_cond_10hz = policy.get_temporal_cond(
+                extended_obs_dict, head="10hz", allow_partial=True, post_process=True
+            )
+            temporal_cond_30hz = policy.get_temporal_cond(
+                extended_obs_dict, head="30hz", allow_partial=True, post_process=True
+            )
 
     timer = CUDATimer(device)
     cases = [
-        ("shortcut_50hz_1step", "50hz", temporal_cond_50hz, 1),
-        ("shortcut_50hz_2step", "50hz", temporal_cond_50hz, 2),
-        ("fm_10hz_5step", "10hz", temporal_cond_10hz, 5),
-        ("fm_10hz_6step", "10hz", temporal_cond_10hz, 6),
+        ("dp_30hz_1step", "30hz", temporal_cond_30hz, 1),
+        ("dp_30hz_2step", "30hz", temporal_cond_30hz, 2),
+        ("dp_10hz_5step", "10hz", temporal_cond_10hz, 5),
+        ("dp_10hz_6step", "10hz", temporal_cond_10hz, 6),
     ]
 
     print("\n[4/4] Running benchmark...")
@@ -271,7 +249,7 @@ def main(cfg):
         else pathlib.Path(ckpt_path).parent / "benchmark_results"
     )
     output_dir.mkdir(exist_ok=True, parents=True)
-    result_path = output_dir / "fm_shortcut_inference_latency.json"
+    result_path = output_dir / "multifreq_cd_inference_latency.json"
 
     result_json = {
         "config": {
@@ -282,10 +260,9 @@ def main(cfg):
             "warmup_iters": warmup_iters,
             "benchmark_iters": benchmark_iters,
             "horizon_10hz": policy.horizon_10hz,
-            "horizon_50hz": policy.horizon_50hz,
+            "horizon_30hz": policy.horizon_30hz,
             "action_dim": policy.action_dim,
-            "shortcut_denoise_steps": policy.shortcut_denoise_steps,
-            "shortcut_dt_flow": policy.shortcut_dt_flow,
+            "training_stage": policy.training_stage,
         },
         "summary": summary,
         "latencies_ms": all_results,

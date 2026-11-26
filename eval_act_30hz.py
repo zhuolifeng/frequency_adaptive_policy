@@ -12,7 +12,7 @@ import tqdm
 from loguru import logger
 from omegaconf import OmegaConf
 
-from ImplicitRDP.common.pytorch_util import dict_apply
+from ImplicitRDP.common.offline_evaluation import group_episode_batches
 from ImplicitRDP.policy.act_30hz_policy import ACT30HzPolicy
 
 plt.switch_backend("Agg")
@@ -118,7 +118,7 @@ def main(cfg):
     output_dir.mkdir(exist_ok=True, parents=True)
 
     logger.info(f"Loading checkpoint: {ckpt_path}")
-    payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill)
+    payload = torch.load(ckpt_path, map_location="cpu", pickle_module=dill)
 
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg)
@@ -137,31 +137,8 @@ def main(cfg):
     replay_buffer = val_dataset.replay_buffer
     episode_ends = replay_buffer.episode_ends[:]
     n_episodes = len(episode_ends)
-    episode_data = [[] for _ in range(n_episodes)]
-    sampler = val_dataset.sampler
+    episode_data = group_episode_batches(val_dataset, device)
 
-    for data_idx in tqdm.tqdm(range(len(val_dataset)), desc="Loading data"):
-        episode_idx = sampler.indices_to_episode_idx[data_idx]
-        sample = val_dataset[data_idx]
-        sample_batch = dict_apply(
-            sample,
-            lambda x: x.unsqueeze(0).to(device, non_blocking=True)
-            if isinstance(x, torch.Tensor)
-            else x,
-        )
-        if "obs" in sample and isinstance(sample["obs"], dict):
-            sample_batch["obs"] = {
-                k: v.unsqueeze(0).to(device, non_blocking=True)
-                for k, v in sample["obs"].items()
-                if isinstance(v, torch.Tensor)
-            }
-        if "extended_obs" in sample and isinstance(sample["extended_obs"], dict):
-            sample_batch["extended_obs"] = {
-                k: v.unsqueeze(0).to(device, non_blocking=True)
-                for k, v in sample["extended_obs"].items()
-                if isinstance(v, torch.Tensor)
-            }
-        episode_data[episode_idx].append(sample_batch)
 
     action_start = int(getattr(policy, "action_start_30hz", cfg.get("action_start_30hz", 7)))
     video_fps = int(cfg.get("video_fps", 1))

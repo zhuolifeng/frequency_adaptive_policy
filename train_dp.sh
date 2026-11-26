@@ -1,27 +1,20 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -eo pipefail
 
-GPU_ID="${GPU_ID:-0,1,2,3,4,5,6,7}"
-MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29504}"
-LOGGING_BACKEND="${LOGGING_BACKEND:-wandb}"
+export MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29504}"
+LOGGING_BACKEND="${LOGGING_BACKEND:-tensorboard}"
 LOGGING_MODE="${LOGGING_MODE:-online}"
 
-IFS=',' read -r -a GPU_ARRAY <<< "${GPU_ID}"
-NUM_PROCESSES="${NUM_PROCESSES:-${#GPU_ARRAY[@]}}"
-ACCELERATE_ARGS=(--main_process_port "${MAIN_PROCESS_PORT}")
-if [ "${NUM_PROCESSES}" -gt 1 ]; then
-    ACCELERATE_ARGS=(--multi_gpu --num_processes "${NUM_PROCESSES}" "${ACCELERATE_ARGS[@]}")
-fi
+TASK="${TASK:-dual_box}"
+export DATASET_PATH="${DATASET_PATH:-data/${TASK}_v5_round_1_zarr}"
 
-# Stage 0: Post-process data
-echo "Stage 0: post-processing data..."
-#python post_process_data.py --tag flip_v2 --action_type right_arm_6DOF --skip_static_frames
-
-# Stage 1: Train Policy
+# Train the diffusion policy
 echo "Stage 1: training Policy..."
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch "${ACCELERATE_ARGS[@]}" train.py \
+bash ./launch_training.sh \
     --config-name=train_diffusion_unet_real_image_workspace \
-    task=real_dual_box_image_dp_10fps \
-    task.dataset_path=/mnt/workspace/users/lifeng/dual_box_v5_round_1_zarr \
-    task.name=real_dual_box_image_dp_10fps_v2 \
-    logging.mode=${LOGGING_MODE} \
-    logging.backend=${LOGGING_BACKEND}
+    "task=real_${TASK}_image_dp_10fps" \
+    'task.dataset_path=${oc.env:DATASET_PATH}' \
+    "task.name=real_${TASK}_image_dp_10fps_v2" \
+    "logging.mode=${LOGGING_MODE}" \
+    "logging.backend=${LOGGING_BACKEND}" \
+    "$@"

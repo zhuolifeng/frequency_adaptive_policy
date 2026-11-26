@@ -39,13 +39,20 @@ class TransformerConfidenceHead(ModuleAttrMixin):
                  use_learnable_pos_emb: bool = False,
                  max_obs_tokens: int = 100,
                  max_cond_tokens: int = 100,
-                 pooling: str = 'mean'):  # 'last', 'mean', 'max'
+                 pooling: str = 'mean',
+                 *,
+                 log_sigma_min: float = -5.0,
+                 log_sigma_max: float = 5.0,
+                 clamp_log_sigma: bool = False):
         super().__init__()
 
         self.n_emb = n_emb
         self.hidden_dim = hidden_dim or n_emb
         self.use_learnable_pos_emb = use_learnable_pos_emb
         self.pooling = pooling
+        self.log_sigma_min = log_sigma_min
+        self.log_sigma_max = log_sigma_max
+        self.clamp_log_sigma = clamp_log_sigma
 
         ff_dim = obs_encoder_hidden_dim or (4 * n_emb)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -136,6 +143,8 @@ class TransformerConfidenceHead(ModuleAttrMixin):
         # Head takes only obs features
         log_sigma_raw = self.head(obs_feat).squeeze(-1)
 
+        if self.clamp_log_sigma:
+            return log_sigma_raw.clamp(self.log_sigma_min, self.log_sigma_max)
         return log_sigma_raw
 
     def get_optim_groups(self, weight_decay: float = 1e-3):

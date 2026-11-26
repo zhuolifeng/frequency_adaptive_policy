@@ -1,7 +1,7 @@
 import cv2
 
 
-def test_camera_capabilities():
+def check_camera_capabilities(device_index):
     # Create a list of common resolutions to test
     test_resolutions = [
         (352, 288),
@@ -17,7 +17,7 @@ def test_camera_capabilities():
     test_fps = [15, 25, 30, 60]
 
     # Initialize the camera (0 is usually the default USB camera)
-    cap = cv2.VideoCapture(12)
+    cap = cv2.VideoCapture(device_index)
 
     if not cap.isOpened():
         print("Error: Could not open camera")
@@ -67,4 +67,8 @@ def test_camera_capabilities():
 
 
 if __name__ == "__main__":
-    test_camera_capabilities()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Probe USB camera resolutions and frame rates.")
+    parser.add_argument("--device", type=int, default=0, help="OpenCV camera index")
+    check_camera_capabilities(parser.parse_args().device)

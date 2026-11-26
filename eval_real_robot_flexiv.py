@@ -3,6 +3,7 @@ import pathlib
 import torch
 import dill
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
@@ -11,14 +12,13 @@ from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFre
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_dual_policy import DPMultiFreqCD30HzConfidenceDualPolicy
 from ImplicitRDP.policy.dp_30hz_imeanflow_policy import DP30HziMeanFlowPolicy
 from ImplicitRDP.policy.dp_30hz_consistency_policy import DP30HzConsistencyPolicy
-from ImplicitRDP.policy.dp_10hz_rectified_flow_consistency_policy import DP10HzRectifiedFlowConsistencyPolicy
 from ImplicitRDP.policy.act_30hz_policy import ACT30HzPolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
 
 import os
 from loguru import logger
-import psutil
+from ImplicitRDP.common.cpu_affinity import bind_evaluation_cpus
 
 # add this to prevent assigning too may threads when using numpy
 os.environ["OPENBLAS_NUM_THREADS"] = "12"
@@ -30,17 +30,6 @@ import cv2
 # add this to prevent assigning too may threads when using open-cv
 cv2.setNumThreads(12)
 
-# Get the total number of CPU cores
-total_cores = psutil.cpu_count()
-# Bind the eval entry process to logical CPU ids 0-17.
-eval_start_core_id = 0
-eval_num_cores = 18
-cores_to_bind = set(range(eval_start_core_id, min(eval_start_core_id + eval_num_cores, total_cores)))
-if not cores_to_bind:
-    cores_to_bind = {max(0, total_cores - 1)}
-# Set CPU affinity for the current process
-os.sched_setaffinity(0, cores_to_bind)
-
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 @hydra.main(
@@ -50,6 +39,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
     config_name="train_diffusion_unet_real_image_workspace"
 )
 def main(cfg):
+    bind_evaluation_cpus(0, 18)
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg)
     workspace: BaseWorkspace
@@ -112,7 +102,7 @@ def main(cfg):
             f"use_confidence={policy.use_confidence_based_head_selection}, "
             f"threshold={policy.confidence_threshold_for_head_selection}"
         )
-    elif isinstance(policy, (DP30HziMeanFlowPolicy, DP30HzConsistencyPolicy, DP10HzRectifiedFlowConsistencyPolicy)):
+    elif isinstance(policy, (DP30HziMeanFlowPolicy, DP30HzConsistencyPolicy)):
         # DP single-frequency flow / consistency policy
         policy = workspace.model
         if cfg.training.use_ema:
@@ -196,7 +186,9 @@ def main(cfg):
 
     # run eval
     env_runner = hydra.utils.instantiate(
-        cfg.task.env_runner)
+        cfg.task.env_runner,
+        output_dir=cfg.task.env_runner.get("output_dir", HydraConfig.get().runtime.output_dir),
+    )
     env_runner.run(policy)
 
 

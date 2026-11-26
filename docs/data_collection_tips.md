@@ -1,5 +1,5 @@
-## Data Collection Tips
-### 1. Pay Attention to Force Feedback during Kinematic Teaching
-Since ImplicitRDP relies on force information for real-time responses, the collected data have to include actions which apply appropriate force to the object.
-We provide a web server for monitoring the force in [ImplicitRDP/real_world/publisher/bimanual_robot_publisher.py](../ImplicitRDP/real_world/publisher/bimanual_robot_publisher.py).
-You can access it at `http://0.0.0.0:8000` to monitor the force during kinematic teaching.
+# Data collection tips
+
+During kinematic teaching, watch the force trace while demonstrating contact. Include both the approach and the change in force as the tool engages the object so the policy can learn when to respond.
+
+The robot publisher serves a live force plot on port 8000 when `vis_wrench` is enabled. Open `http://localhost:8000` on the workstation running the publisher. From another machine, use the workstation's hostname in place of `localhost`. [Robot publisher](../ImplicitRDP/real_world/publisher/bimanual_robot_publisher.py)

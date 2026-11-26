@@ -12,16 +12,9 @@ from omegaconf import OmegaConf
 import tqdm
 import json
 
-from ImplicitRDP.workspace.base_workspace import BaseWorkspace
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
 from ImplicitRDP.policy.hybrid_diffusion_act_confidence_policy import HybridDiffusionACTConfidencePolicy
-from ImplicitRDP.policy.hybrid_diffusion_act_confidence_stagewise_policy import HybridDiffusionACTConfidenceStagewisePolicy
-from ImplicitRDP.policy.act_confidence_policy import ACTConfidencePolicy
-from ImplicitRDP.policy.act_confidence_dual_encoder_policy import ACTConfidenceDualEncoderPolicy
-from ImplicitRDP.policy.act_confidence_dual_encoder_stagewise_policy import ACTConfidenceDualEncoderStagewisePolicy
-from ImplicitRDP.policy.act_confidence_stagewise_policy import ACTConfidenceStagewisePolicy
-from ImplicitRDP.dataset.base_dataset import BaseImageDataset
-from ImplicitRDP.common.pytorch_util import dict_apply
+from ImplicitRDP.common.offline_evaluation import group_episode_batches
 
 plt.switch_backend('Agg')
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -66,14 +59,14 @@ def compute_errors(gt_action, pred_action, policy):
     action_dim = gt_action.shape[-1]
 
     # XYZ error (first 3 dimensions)
-    gt_xyz = gt_action[:, :3].cpu().numpy()
-    pred_xyz = pred_action[:, :3].cpu().numpy()
+    gt_xyz = gt_action[..., :3].cpu().numpy()
+    pred_xyz = pred_action[..., :3].cpu().numpy()
     error_xyz = gt_xyz - pred_xyz
 
     # RPY error (dimensions 3-5 if available)
     if action_dim >= 6:
-        gt_rpy = gt_action[:, 3:6].cpu().numpy()
-        pred_rpy = pred_action[:, 3:6].cpu().numpy()
+        gt_rpy = gt_action[..., 3:6].cpu().numpy()
+        pred_rpy = pred_action[..., 3:6].cpu().numpy()
         error_rpy = gt_rpy - pred_rpy
     else:
         error_rpy = np.zeros_like(error_xyz)
@@ -250,27 +243,17 @@ def process_single_episode(policy, episode_data_list, episode_force_data, has_co
 
             # Store data - take average MSE over the entire chunk
             mse_data.append(float(mse[0].mean()))
-            xyz_error_data.append(error_xyz[0].tolist())
-            rpy_error_data.append(error_rpy[0].tolist())
+            xyz_error_data.append(error_xyz[0].mean(axis=0).tolist())
+            rpy_error_data.append(error_rpy[0].mean(axis=0).tolist())
             gt_action_chunk_data.append(aligned_gt_action[0].detach().cpu().numpy())
             pred_action_chunk_data.append(aligned_pred_action[0].detach().cpu().numpy())
 
             # Compute confidence if available
             if has_confidence:
                 try:
-                    if hasattr(policy, 'act_encoder') and hasattr(policy, 'confidence_encoder'):
-                        # Dual encoder policy - use confidence encoder
-                        obs_tokens, _ = policy._predict_obs_tokens(
-                            obs_dict, extended_obs_dict,
-                            encoder_type='confidence',
-                            return_temporal_cond=True
-                        )
-                    else:
-                        # other policies
-                        obs_tokens, _ = policy._predict_obs_tokens(
-                            obs_dict, extended_obs_dict, 
-                            return_temporal_cond=True
-                        )
+                    obs_tokens, _ = policy._predict_obs_tokens(
+                        obs_dict, extended_obs_dict, return_temporal_cond=True
+                    )
                     log_sigma = policy._compute_confidence_logits(obs_tokens)
                     log_sigma_val = float(log_sigma.mean().item()) if log_sigma is not None else float('nan')
                     log_sigma_data.append(log_sigma_val)
@@ -409,7 +392,7 @@ def process_single_episode(policy, episode_data_list, episode_force_data, has_co
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.joinpath('ImplicitRDP', 'config')),
-    config_name="train_act_confidence_workspace"
+    config_name="train_hybrid_diffusion_act_confidence_workspace"
 )
 def main(cfg):
     logger.info("Starting policy evaluation...")
@@ -429,7 +412,7 @@ def main(cfg):
 
     logger.info(f"Loading checkpoint: {ckpt_path}")
     logger.info(f"Output directory: {output_dir}")
-    payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
+    payload = torch.load(ckpt_path, map_location="cpu", pickle_module=dill)
 
     # Create workspace and load policy
     cls = hydra.utils.get_class(cfg._target_)
@@ -438,22 +421,17 @@ def main(cfg):
 
     # Get policy
     policy = workspace.ema_model if cfg.training.use_ema else workspace.model
-    if not isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy, ACTConfidenceDualEncoderStagewisePolicy, ACTConfidenceStagewisePolicy, HybridDiffusionACTConfidencePolicy, HybridDiffusionACTConfidenceStagewisePolicy, DiffusionTransformerImagePolicy)):
+    if not isinstance(policy, (HybridDiffusionACTConfidencePolicy, DiffusionTransformerImagePolicy)):
         raise ValueError(f"Unsupported policy type: {type(policy)}")
-
-    # Determine evaluation parameters
-    if isinstance(policy, (ACTConfidencePolicy, ACTConfidenceDualEncoderPolicy, ACTConfidenceDualEncoderStagewisePolicy, ACTConfidenceStagewisePolicy)):
-        has_confidence = policy.confidence_head is not None
-    elif isinstance(policy, (HybridDiffusionACTConfidencePolicy, HybridDiffusionACTConfidenceStagewisePolicy)):
-        has_confidence = hasattr(policy, 'confidence_head') and policy.confidence_head is not None
-    else:  # DiffusionTransformerImagePolicy
-        has_confidence = False
+    has_confidence = getattr(policy, "confidence_head", None) is not None
 
     logger.info(f"Policy type: {type(policy).__name__}")
     logger.info(f"Confidence head: {'Enabled' if has_confidence else 'Disabled'}")
 
     # Setup device and policy
     device = torch.device(cfg.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
+    if cfg.get("num_inference_steps") is not None:
+        policy.num_inference_steps = int(cfg.num_inference_steps)
     policy.eval().to(device)
 
     # Load dataset
@@ -466,21 +444,8 @@ def main(cfg):
     n_episodes = len(episode_ends)
 
     # Organize data by episodes
-    episode_data = [[] for _ in range(n_episodes)]
-    sampler = val_dataset.sampler
+    episode_data = group_episode_batches(val_dataset, device)
 
-    for data_idx in tqdm.tqdm(range(len(val_dataset)), desc="Loading data"):
-        episode_idx = sampler.indices_to_episode_idx[data_idx]
-        sample = val_dataset[data_idx]
-        sample_batch = dict_apply(sample, lambda x: x.unsqueeze(0).to(device, non_blocking=True)
-                                 if isinstance(x, torch.Tensor) else x)
-        if 'obs' in sample and isinstance(sample['obs'], dict):
-            sample_batch['obs'] = {k: v.unsqueeze(0).to(device, non_blocking=True)
-                                   for k, v in sample['obs'].items() if isinstance(v, torch.Tensor)}
-        if 'extended_obs' in sample and isinstance(sample['extended_obs'], dict):
-            sample_batch['extended_obs'] = {k: v.unsqueeze(0).to(device, non_blocking=True)
-                                            for k, v in sample['extended_obs'].items() if isinstance(v, torch.Tensor)}
-        episode_data[episode_idx].append(sample_batch)
 
     # Create output directory (already created above)
     video_fps = cfg.get('video_fps', 10)
@@ -493,11 +458,7 @@ def main(cfg):
         start = int(end)
 
     # Find force keys in zarr
-    force_keys = []
-    for k in replay_buffer.keys():
-        if 'wrench' in k.lower():
-            force_keys.append(k)
-    force_keys = sorted(force_keys)
+    force_keys = sorted(k for k in replay_buffer.keys() if k.endswith("_tcp_wrench"))
     logger.info(f"Found force keys in zarr: {force_keys}")
 
     # Load force data from zarr

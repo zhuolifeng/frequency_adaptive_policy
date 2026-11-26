@@ -1,0 +1,25 @@
+# Install the appropriate PyTorch wheels for your accelerator first (see README).
+torch==2.2.2
+torchvision==0.17.2
+accelerate<2
+diffusers==0.33.1
+dill
+einops>=0.6
+hydra-core>=1.3,<1.4
+loguru
+matplotlib
+numba
+numpy==1.26.4
+# ReplayBuffer uses the Zarr v2 store and compressor APIs.
+zarr>=2.16,<3
+numcodecs<0.16
+opencv-python
+pandas
+pydantic>=2
+scipy
+tensorboard
+threadpoolctl
+timm
+tqdm
+transforms3d
+wandb

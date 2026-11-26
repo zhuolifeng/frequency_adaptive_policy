@@ -495,7 +495,8 @@ class ReplayBuffer:
                     arr.resize(new_shape)
                 else:
                     # compatible with image data (N, H, W, C)
-                    self.data[key] = np.resize(arr, new_shape)
+                    arr = np.resize(arr, new_shape)
+                    self.data[key] = arr
             # copy data
             arr[-value.shape[0]:] = value
         

@@ -1,8 +1,9 @@
+"""Plot recorded force with a synthetic confidence trace for illustration."""
 import json
 import os
 from pathlib import Path
 
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+DATA_ROOT = Path(os.environ.get("DATA_ROOT", "data"))
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,36 +18,36 @@ ANNOTATION_SIZE = 13
 
 DATASETS = [
     {
-        "path": Path("/mnt/workspace/users/lifeng/dual_button_v1_round_1_zarr"),
+        "path": DATA_ROOT / "dual_button_v1_round_1_zarr",
         "task": "dual_button_pressing task",
         "json_name": "dual_button_pressing_force.json",
         "color": "#5F7FA6",
         "episode_idx": 1,
-        "confidence_json_name": "dual_button_pressing_confidence.json",
+        "confidence_json_name": "dual_button_pressing_synthetic_confidence.json",
         "confidence_low_prefix_end": 120,
         "confidence_high_groups": [(120, 3.692), (149, 4.031)],
         "confidence_tail_start": 178,
         "confidence_seed": 20260708,
     },
     {
-        "path": Path("/mnt/workspace/users/lifeng/dual_switch_v8_round_1_zarr"),
+        "path": DATA_ROOT / "dual_switch_v8_round_1_zarr",
         "task": "dual_switch_toggling task",
         "json_name": "dual_switch_toggling_force.json",
         "color": "#D66F55",
         "episode_idx": 4,
-        "confidence_json_name": "dual_switch_toggling_confidence.json",
+        "confidence_json_name": "dual_switch_toggling_synthetic_confidence.json",
         "confidence_low_prefix_end": 168,
         "confidence_high_groups": [(168, 3.554), (197, 4.108)],
         "confidence_tail_start": 226,
         "confidence_seed": 20260709,
     },
     {
-        "path": Path("/mnt/workspace/users/lifeng/dual_box_v5_round_1_zarr"),
+        "path": DATA_ROOT / "dual_box_v5_round_1_zarr",
         "task": "dual_box_flipping task",
         "json_name": "dual_box_flipping_force.json",
         "color": "#27456F",
         "episode_idx": 2,
-        "confidence_json_name": "dual_box_flipping_confidence.json",
+        "confidence_json_name": "dual_box_flipping_synthetic_confidence.json",
         "confidence_low_prefix_end": 114,
         "confidence_high_groups": [
             (114, 3.561),
@@ -207,6 +208,7 @@ def plot_force_curves(series, output_path: Path) -> None:
         linestyle="-",
         linewidth=2.0,
     )
+    ax2.set_ylabel("Synthetic confidence (illustrative)")
     ax2.set_ylim(0, 4.5)
     ax2.set_yticks([])
     ax2.tick_params(axis="y", which="both", right=False, labelright=False)
@@ -263,6 +265,7 @@ def plot_single_task(item, output_path: Path) -> None:
         alpha=0.9,
     )
     ax2.axhline(y=3.5, color="black", linestyle="-", linewidth=2.0)
+    ax2.set_ylabel("Synthetic confidence (illustrative)")
     ax2.set_ylim(0, 4.5)
     ax2.set_yticks([])
     ax2.tick_params(axis="y", which="both", right=False, labelright=False)
@@ -301,6 +304,7 @@ def main():
         item["task"]: {
             "dataset": str(item["path"]),
             "episode_idx": int(item["episode_idx"]),
+            "confidence_source": "synthetic illustration",
             "frames": int(len(item["force"])),
             "min_force_N": float(np.min(item["force"])),
             "max_force_N": float(np.max(item["force"])),

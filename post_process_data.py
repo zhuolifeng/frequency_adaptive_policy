@@ -1,4 +1,5 @@
 import pickle
+import shutil
 import os
 from loguru import logger
 import zarr
@@ -61,6 +62,7 @@ def get_global_offset(local_offset, tcp_pose):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--data-root', default='data', help='Parent directory for recordings and processed datasets')
     parser.add_argument('--tag', type=str, default='flip_v5_round_1')
     parser.add_argument('--action_type', type=str, default='right_arm_3D_translation')
     parser.add_argument('-ss', '--skip_static_frames', action='store_true', default=False)
@@ -98,8 +100,8 @@ if __name__ == '__main__':
     DRAW_FORCE = False  # for debugging force
     USE_ABSOLUTE_ACTION = True
 
-    data_dir = f'/mnt/workspace/users/lifeng/{TAG}'
-    save_data_dir = f'/mnt/workspace/users/lifeng/{TAG}'
+    data_dir = osp.join(args.data_root, TAG)
+    save_data_dir = data_dir
     STIFFNESS_COMPENSATION=False
     if STIFFNESS_COMPENSATION:
         save_data_dir += '_sc'
@@ -120,7 +122,7 @@ if __name__ == '__main__':
         # use py_cli_interaction to ask user if they want to overwrite the data
         if py_cli_interaction.parse_cli_bool('Do you want to overwrite the data?', default_value=True)[0]:
             logger.warning('Overwriting {}'.format(save_data_path))
-            os.system('rm -rf {}'.format(save_data_path))
+            shutil.rmtree(save_data_path)
         else:
             exit()
 

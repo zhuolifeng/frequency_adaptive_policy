@@ -1,4 +1,56 @@
-## Customized Deployment Guide
+# Deploy on a robot
+
+The reference setup uses a Flexiv Rizon arm with a six-axis force/torque sensor, an external USB camera and a wrist camera. The dual-switch configuration uses an iPhone with Record3D on the wrist. Other tasks include RealSense and tactile sensors. [Reference hardware](../assets/hardware_settings.png)
+
+## Prepare the workstation
+
+Install ROS 2 Humble on Ubuntu 22.04, source `/opt/ros/humble/setup.bash` and activate the Python 3.10 environment from the README in each terminal. Install the full Python requirements and the Flexiv RDK bindings for your controller. Configurations with `right_enable_tdk` also require the vendor's TDK bindings and a leader robot. The camera launcher imports Record3D and RealSense bindings, and the real-time camera process requests priority 99. Configure the workstation's real-time scheduling permissions and choose CPU IDs available to each process. [ROS 2 installation](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html) · [Camera launcher](../camera_node_launcher.py)
+
+```bash
+source /opt/ros/humble/setup.bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Set the robot serial numbers, service addresses and calibration directory for your installation in the robot environment and task YAMLs. Verify the camera assignments, CPU affinity, control mode, action representation and workspace limits for the physical setup. The checked-in calibration matrices describe the reference installation. [Robot environment](../ImplicitRDP/config/task/real_robot_env.yaml) · [Dual-switch hardware configuration](../ImplicitRDP/config/task/real_dual_switch_iphone_usb_camera_30_10fps.yaml)
+
+## Record a demonstration
+
+Start the control service and the camera launcher in separate terminals using the same task. The camera launcher also starts the device mapping service.
+
+```bash
+# Terminal 1
+python control.py task=real_dual_switch_iphone_usb_camera_30_10fps
+```
+
+```bash
+# Terminal 2
+python camera_node_launcher.py task=real_dual_switch_iphone_usb_camera_30_10fps
+```
+
+Start the recorder in a third terminal and perform the demonstration. Stop it with Ctrl+C to save the episode. Give each subsequent episode a new numeric filename. The recorder writes the example below to `data/dual_switch_v1_round_1/0.pkl`.
+
+```bash
+python record_data.py --task real_dual_switch_iphone_usb_camera_30_10fps \
+    --save_to_disk --save_file_dir dual_switch_v1_round_1 --save_file_name 0.pkl
+```
+
+For tasks configured for manual kinematic teaching, the reference single-button keyboard sends the Pause key. Hold it to enable compliance during teaching and release it to end compliance, or select toggle mode in the controller. The dual-switch example above uses an external controller. [Kinematic teaching controller](../ImplicitRDP/real_world/kinematic_teaching/kineteach_controller.py) · [Force monitoring](data_collection_tips.md)
+
+## Run a trained policy
+
+With the control and camera services running, start the evaluation in another terminal. Set the workspace and task to match the checkpoint. This example uses the dual-switch 30 Hz iMeanFlow policy and the runner's right-arm 6-DOF action mode.
+
+```bash
+CONFIG_NAME=train_dp_30hz_imeanflow_workspace \
+    TASK_CONFIG=real_dual_switch_image_wrench_offline_10fps_30hz \
+    CKPT_PATH=/path/to/checkpoints/latest.ckpt bash eval.sh \
+    task.env_runner.action_type=right_arm_6DOF
+```
+
+For a frequency-adaptive checkpoint, use the multi-frequency training workspace and the dual-rate runner for the same task. Set `policy.training_stage` to match the checkpoint, enable `policy.use_confidence_based_head_selection`, and set `policy.confidence_threshold_for_head_selection` from calibration data. The runner chooses the 30 Hz head when the predicted score exceeds the threshold and the 10 Hz head otherwise. [Dual-switch dual-rate runner configuration](../ImplicitRDP/config/task/real_dual_switch_image_wrench_offline_10fps_dual_hz.yaml)
+
+For optional experiment video recording, configure the camera server address in the task file and start `vcamera_server.py` with the matching camera type, ID and port. [MindVision camera setup](../third_party/mvsdk/README.md)
 
 ### Add Customized Tasks
 There are two kinds of task configs: **shared configs** and **policy-related configs**.

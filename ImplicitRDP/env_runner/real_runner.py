@@ -37,7 +37,7 @@ import requests
 import rerun as rr
 
 import os
-import psutil
+from ImplicitRDP.common.cpu_affinity import bind_evaluation_cpus
 from copy import deepcopy
 
 # add this to prevent assigning too may threads when using numpy
@@ -49,17 +49,6 @@ os.environ["OMP_NUM_THREADS"] = "12"
 import cv2
 # add this to prevent assigning too may threads when using open-cv
 cv2.setNumThreads(12)
-
-# Get the total number of CPU cores
-total_cores = psutil.cpu_count()
-# Bind the runner to the 19th and 20th logical CPUs (0-based CPU ids 18 and 19).
-runner_start_core_id = 18
-runner_num_cores = 2
-cores_to_bind = set(range(runner_start_core_id, min(runner_start_core_id + runner_num_cores, total_cores)))
-if not cores_to_bind:
-    cores_to_bind = {max(0, total_cores - 1)}
-# Set CPU affinity for the current process/thread
-os.sched_setaffinity(0, cores_to_bind)
 
 class RealRunner:
     def __init__(self,
@@ -101,6 +90,7 @@ class RealRunner:
                  task_name=None,
                  enable_rerun_visualization: bool = False,
                  ):
+        bind_evaluation_cpus(18, 2)
         self.task_name = task_name
         self.transforms = RealWorldTransforms(option=transform_params)
         self.shape_meta = dict(shape_meta)

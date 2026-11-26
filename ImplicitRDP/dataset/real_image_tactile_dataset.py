@@ -46,7 +46,12 @@ class RealImageTactileDataset(BaseImageDataset):
                  rpy_for_rotation=False,
                  transform_params=None,
                  ):
-        assert os.path.isdir(dataset_path)
+        self.zarr_path = os.path.join(dataset_path, 'replay_buffer.zarr')
+        if not os.path.exists(self.zarr_path):
+            raise FileNotFoundError(
+                f"Expected a processed dataset at {self.zarr_path}. "
+                "Set task.dataset_path to the directory containing replay_buffer.zarr."
+            )
 
         stacks_to_flatten = list()
         
@@ -82,7 +87,6 @@ class RealImageTactileDataset(BaseImageDataset):
             elif type == 'low_dim':
                 extended_lowdim_keys.append(key)
 
-        self.zarr_path = os.path.join(dataset_path, 'replay_buffer.zarr')
         zarr_load_keys = set(action_key + rgb_keys + lowdim_keys + extended_rgb_keys + extended_lowdim_keys)
         zarr_load_keys = list(filter(lambda key: "wrt" not in key, zarr_load_keys))
         replay_buffer = ReplayBuffer.copy_from_path(
@@ -225,7 +229,7 @@ class RealImageTactileDataset(BaseImageDataset):
             if self.relative_action or self.rpy_for_rotation:
                 action_stack_all = recalculate_data_dict['action_stack']
             else:
-                action_stack_all = self.replay_buffer['action_stack'][:, :self.shape_meta['action_stack']['shape'][0]]
+                action_stack_all = self.replay_buffer['action_30hz'][:, :self.shape_meta['action_stack']['shape'][0]]
             normalizer['action_stack'] = get_action_normalizer(action_stack_all)
         # obs
         for key in self.lowdim_keys:

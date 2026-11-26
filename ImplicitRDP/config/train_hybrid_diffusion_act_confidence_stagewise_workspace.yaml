@@ -191,7 +191,7 @@ training:
   stage2_epochs: 600
   stage3_epochs: 250
   stage3_dataset_path: null
-  num_epochs: eval:'${stage1_epochs}+${stage2_epochs}+${stage3_epochs}'
+  num_epochs: ${eval:'${training.stage1_epochs}+${training.stage2_epochs}+${training.stage3_epochs}'}
   gradient_accumulate_every: 1
   # EMA destroys performance when used with BatchNorm
   # replace BatchNorm with GroupNorm.

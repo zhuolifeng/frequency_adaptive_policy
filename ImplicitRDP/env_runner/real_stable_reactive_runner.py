@@ -14,7 +14,6 @@ from omegaconf import DictConfig, ListConfig
 from ImplicitRDP.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from ImplicitRDP.policy.diffusion_transformer_image_policy import DiffusionTransformerImagePolicy
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import DPMultiFreqCD30HzConfidencePolicy
-from ImplicitRDP.policy.dp_10hz_rectified_flow_consistency_policy import DP10HzRectifiedFlowConsistencyPolicy
 from ImplicitRDP.common.pytorch_util import dict_apply
 from ImplicitRDP.common.precise_sleep import precise_sleep
 from ImplicitRDP.env.real_bimanual.real_env import RealRobotEnvironment
@@ -41,7 +40,7 @@ import requests
 import rerun as rr
 
 import os
-import psutil
+from ImplicitRDP.common.cpu_affinity import bind_evaluation_cpus
 from copy import deepcopy
 
 # add this to prevent assigning too may threads when using numpy
@@ -54,18 +53,6 @@ import cv2
 
 # add this to prevent assigning too may threads when using open-cv
 cv2.setNumThreads(12)
-
-# Get the total number of CPU cores
-total_cores = psutil.cpu_count()
-# Bind the runner to the 19th and 20th logical CPUs (0-based CPU ids 18 and 19).
-runner_start_core_id = 18
-runner_num_cores = 2
-cores_to_bind = set(range(runner_start_core_id, min(runner_start_core_id + runner_num_cores, total_cores)))
-if not cores_to_bind:
-    cores_to_bind = {max(0, total_cores - 1)}
-# Set CPU affinity for the current process/thread
-os.sched_setaffinity(0, cores_to_bind)
-
 
 class RealStableReactiveRunner:
     def __init__(self,
@@ -105,6 +92,7 @@ class RealStableReactiveRunner:
                  enable_rerun_visualization: bool = False,
                  **kwargs
                  ):
+        bind_evaluation_cpus(18, 2)
         self.task_name = task_name
         self.transforms = RealWorldTransforms(option=transform_params)
         self.shape_meta = dict(shape_meta)
@@ -155,7 +143,8 @@ class RealStableReactiveRunner:
         self.control_fps = self.execution_fps
         self.control_interval_time = self.execution_dt
         self.inference_interval_time = self.policy_dt
-        self.relative_action_log_path = "/home/lifeng/frequency_adaptive_policy/relative_pos.txt"
+        os.makedirs(output_dir, exist_ok=True)
+        self.relative_action_log_path = osp.join(output_dir, "relative_pos.txt")
         with open(self.relative_action_log_path, "w", encoding="utf-8"):
             pass
         self.latency_step = latency_step
@@ -699,7 +688,7 @@ class RealStableReactiveRunner:
                 logger.error(f"Failed to stop recording video")
 
     def run(self,
-            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, DPMultiFreqCD30HzConfidencePolicy, DP10HzRectifiedFlowConsistencyPolicy]):
+            policy: Union[DiffusionUnetImagePolicy, DiffusionTransformerImagePolicy, DPMultiFreqCD30HzConfidencePolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:

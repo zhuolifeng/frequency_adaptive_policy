@@ -45,30 +45,16 @@ class CustomizedTransformerDecoderLayer(nn.TransformerDecoderLayer):
                 need_weights=need_weights,
             )
 
-        # PyTorch's native/SDPA MHA fast paths do not support forward AD.
-        # Disable the native MHA fast path and request weights to force the
-        # math path while torch.func.jvp is tracing dual tensors.
-        mha_backend = getattr(torch.backends, "mha", None)
-        can_toggle_fastpath = (
-            mha_backend is not None
-            and hasattr(mha_backend, "get_fastpath_enabled")
-            and hasattr(mha_backend, "set_fastpath_enabled")
+        # The fused self-attention and SDPA kernels do not implement JVP.
+        # A distinct query view bypasses the identity-based self-attention
+        # fast path even on PyTorch versions without a backend switch.
+        return mha(
+            query.view_as(query), key, value,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
+            is_causal=is_causal,
+            need_weights=True,
         )
-        old_fastpath = None
-        if can_toggle_fastpath:
-            old_fastpath = mha_backend.get_fastpath_enabled()
-            mha_backend.set_fastpath_enabled(False)
-        try:
-            return mha(
-                query, key, value,
-                attn_mask=attn_mask,
-                key_padding_mask=key_padding_mask,
-                is_causal=is_causal,
-                need_weights=True,
-            )
-        finally:
-            if can_toggle_fastpath:
-                mha_backend.set_fastpath_enabled(old_fastpath)
 
     def _sa_block(self, x: Tensor, attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor], is_causal: bool = False) -> Tensor:
         x, _ = self._mha_forward(

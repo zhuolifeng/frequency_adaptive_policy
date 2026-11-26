@@ -1,168 +1,91 @@
-<h3 align="center">
-    ImplicitRDP:
-</h3>
-<h4 align="center">
-    An End-to-End Visual-Force Diffusion Policy with Structural Slow-Fast Learning
-</h4>
+# Frequency Adaptive Policy
 
-<p align="center">
-    <a href="https://wendichen.me">Wendi Chen</a><sup>12</sup>,
-    <a href="https://hanxue.me">Han Xue</a><sup>1</sup>,
-    Yi Wang<sup>12</sup>,
-    <a href="https://uimicro.com">Fangyuan Zhou</a><sup>12</sup>,
-    <a href="https://lyuj1998.github.io">Jun Lv</a><sup>13</sup>,
-    <a href="https://github.com/EricJin2002">Yang Jin</a><sup>1</sup>,
-    Shirun Tang<sup>3</sup>,
-    <br>
-    <a href="https://alvinwen428.github.io">Chuan Wen</a><sup>1†</sup>,
-    <a href="https://www.mvig.org">Cewu Lu</a><sup>123†</sup>
-    <br>
-    <sup>1</sup>Shanghai Jiao Tong University
-    <sup>2</sup>Shanghai Innovation Institute
-    <sup>3</sup>Noematrix Ltd.
-    <br>
-    <sup>*</sup>Equal contribution
-    <sup>†</sup>Equal advising
-    <br>
-</p>
+This repository trains robot manipulation policies from demonstrations with camera images, end-effector poses and force/torque measurements. The `flow` branch includes a policy that uses confidence to select between 10 Hz and 30 Hz action predictions. It also includes fixed-rate 30 Hz iMeanFlow, consistency and ACT policies for comparison. The training code and robot interfaces build on ImplicitRDP. [Original project](https://implicit-rdp.github.io)
 
-<div align="center">
-<a href='https://arxiv.org/abs/2512.10946'><img alt='arXiv' src='https://img.shields.io/badge/arXiv-2512.10946-red.svg'></a> &nbsp;&nbsp;&nbsp;&nbsp;
-<a href='https://implicit-rdp.github.io'><img alt='project website' src='https://img.shields.io/website-up-down-green-red/http/cv.lbesson.qc.to.svg'></a> &nbsp;&nbsp;&nbsp;&nbsp;
-<a href='https://huggingface.co/datasets/WendiChen/ImplicitRDP_dataset'><img alt='data' src='https://img.shields.io/badge/data-FFD21E?logo=huggingface&logoColor=000'></a> &nbsp;&nbsp;&nbsp;&nbsp;
-<a href='https://huggingface.co/WendiChen/ImplicitRDP_model'><img alt='checkpoints' src='https://img.shields.io/badge/checkpoints-FFD21E?logo=huggingface&logoColor=000'></a> &nbsp;&nbsp;&nbsp;&nbsp;
-<img alt='powered by Pytorch' src='https://img.shields.io/badge/PyTorch-❤️-F8C6B5?logo=pytorch&logoColor=white'> &nbsp;&nbsp;&nbsp;&nbsp;
-</div>
+## Install
 
-<p align="center">
-<img src="assets/teaser.png" alt="teaser" style="width:75%;" />
-</p>
+The reference environment uses Ubuntu 22.04, Python 3.10 and an NVIDIA GPU. Run the examples from the repository root. The following commands install the CUDA 12.1 build of PyTorch.
 
-## ⚙️ Environment Setup
-### 📝 Use Customized Force Sensors, Robots and Customized Tasks
-Please refer to [docs/customized_deployment_guide.md](docs/customized_deployment_guide.md).
-
-### Hardware
-- Workstation with Ubuntu 22.04 for compatibility with ROS2 Humble.
-    > A workstation with a GPU (e.g., NVIDIA RTX 3090) is required.
-- 1 robot arms with a 6-axis force/torque sensor at the end effector.
-    > We use [Flexiv Rizon 4s](https://www.flexiv.com/products/rizon).
-- 1 USB camera or [RealSense](https://www.intelrealsense.com) camera.
-    > We use an off-the-shelf USB camera for external camera.
-      Follow the [official document](https://dev.intelrealsense.com/docs/compiling-librealsense-for-linux-ubuntu-guide) to install librealsense2 if you use RealSense camera.
-- (Optional) A single-button keyboard for controlling kinematic teaching.
-  > We assign this button as the “pause” key. When the button is pressed, the robot can be dragged for teaching. You can modify the used key in [ImplicitRDP/real_world/kinematic_teaching/kineteach_controller.py](ImplicitRDP/real_world/kinematic_teaching/kineteach_controller.py).
-
-<p align="center">
-<img src="assets/hardware_settings.png" alt="hardware settings" style="width:50%;" />
-</p>
-
-### Software
-1. Follow the [official document](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html) to install ROS2 Humble.
-2. Since ROS2 has some compatibility issues with Conda, we recommend using a virtual environment with `venv`.
-   ```bash
-   python3 -m venv implicitrdp_venv
-   source implicitrdp_venv/bin/activate
-   pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
-   pip install -r requirements.txt
-   ```
-3. We perform manual CPU core binding to reducing the delay caused by the OS scheduler.
-    1. Add config into `/etc/security/limits.conf` to ensure the user has the permission to set realtime priority.
-        ```
-        username - rtprio 99
-        ```
-    2. Edit `/etc/default/grub` and add `isolcpus=xxx` to the `GRUB_CMDLINE_LINUX_DEFAULT` line
-    for isolating certain CPU cores.
-    3. Modify the task config file (e.g. [ImplicitRDP/config/task/real_flip_one_usb_camera_kineteach_10fps.yaml](ImplicitRDP/config/task/real_flip_one_usb_camera_kineteach_10fps.yaml)) and the beginning several lines of all entry-point Python files (e.g. [control.py](control.py)) to adjust the corresponding core binding.
-
-## 📦 Data Collection
-### Kinematic Teaching
-The environment and the task have to be configured first and then start several services for performing kinematic teaching, publishing sensor data and record the data.
-  1. Environment and Task Configuration.
-        - **Environment Configuration.**
-          Edit [ImplicitRDP/config/task/real_robot_env.yaml](ImplicitRDP/config/task/real_robot_env.yaml) to configure the environment settings including `host_ip` and `robot_serial_number`.
-          Note that the VR config options exist solely for compatibility with the original Reactive Diffusion Policy, so you don't need to modify them.
-        - **Task Configuration.**
-          Create task config file which assigns the camera and sensor to use.
-          You can take [ImplicitRDP/config/task/real_flip_one_usb_camera_kineteach_10fps.yaml](ImplicitRDP/config/task/real_flip_one_usb_camera_kineteach_10fps.yaml)
-          as an example.
-          Refer to [docs/customized_deployment_guide.md](docs/customized_deployment_guide.md) for more details.
-   2. Start services. Run each command in a separate terminal. You can use tmux to split the terminal.
-      ```bash
-      # start controlling service
-      python control.py task=[task_config_file_name]
-      # start camera node launcher
-      python camera_node_launcher.py task=[task_config_file_name]
-      # start data recorder
-      python record_data.py --save_to_disk --vis_wrench --save_file_dir [task_data_dir] --save_file_name [record_seq_file_name]
-      ```
-  3. Press the "pause" button to enable the kinematic teaching.
-
-### Data Collection Tips
-Please refer to [docs/data_collection_tips.md](docs/data_collection_tips.md).
-
-### Example Data
-We provide the data we collected on [![data](https://img.shields.io/badge/data-FFD21E?logo=huggingface&logoColor=000)](https://huggingface.co/datasets/WendiChen/ImplicitRDP_dataset).
-
-## 📚 Training
-1. **Task Configuration.**
-   In addition to the task config file used in [data collection](#-data-collection),
-   another file is needed to configure dataset, runner, and model-related parameters such as `obs` and `action`.
-   You can take [ImplicitRDP/config/task/real_flip_image_wrench_implicitrdp_10fps.yaml](ImplicitRDP/config/task/real_flip_image_wrench_implicitrdp_10fps.yaml) as an example.
-   Refer to [docs/customized_deployment_guide.md](docs/customized_deployment_guide.md) for more details.
-   > The `dp`, `at`, `ldp`, `dpt`, `vrr`, `fp`, `no aux` in the config file name indicate the Diffusion policy, Asymmetric Tokenizer, Latent Diffusion Policy, Diffusion Policy (Transformer), Virtual-target-based Representation Regularization, Force Prediction and No Auxiliary Task.
-2. **Run the Training Script.**
-   We provide training scripts for Diffusion Policy, Reactive Diffusion Policy, Diffusion Policy (Transformer) and ImplicitRDP.
-   The scripts will first post-process the data and then train the model.
-   You can modify the training script to train the desired task and model.
-   ```bash
-   # config multi-gpu training
-   accelerate config
-   # Diffusion Policy
-   ./train_dp.sh
-   # Reactive Diffusion Policy
-   ./train_rdp.sh
-   # Diffusion Policy (Transformer)
-   ./train_dpt.sh
-   # ImplicitRDP
-   ./train_implicitrdp.sh
-   ```
-   > Make sure the `action_type` when post-processing the data is consistent with the the task config file.
-
-## 🚀 Inference
-1. (Optional) Refer to `vcamera_server_ip` and `vcamera_server_port` in the task config file and start the corresponding vcamera server.
-If you want to record experiment videos with MindVision cameras, follow [third_party/mvsdk/README.md](third_party/mvsdk/README.md) to install MindVision SDK.
-We also support recording videos with RealSense or USB cameras.
-   ```bash
-   # run vcamera server
-   python vcamera_server.py --host_ip [host_ip] --port [port] --camera_type [camera_type] --camera_id [camera_id] --fps [fps]
-   ```
-2. Modify [eval.sh](eval.sh) to set the task and model you want to evaluate and run the command in separate terminals.
-   ```bash
-   # start controlling service
-   python control.py task=[task_config_file_name]
-   # start camera node launcher
-   python camera_node_launcher.py task=[task_config_file_name]
-   # start inference
-   ./eval.sh
-   ```
-
-### Checkpoints
-We provide the checkpoints in our experiments on [![checkpoints](https://img.shields.io/badge/checkpoints-FFD21E?logo=huggingface&logoColor=000)](https://huggingface.co/WendiChen/ImplicitRDP_model).
-
-## 🙏 Acknowledgement
-Our work is built upon
-[Reactive Diffusion Policy](https://github.com/xiaoxiaoxh/reactive_diffusion_policy),
-[Diffusion Policy](https://github.com/real-stanford/diffusion_policy),
-[VQ-BeT](https://github.com/jayLEE0301/vq_bet_official),
-[Stable Diffusion](https://github.com/CompVis/stable-diffusion),
-[UMI](https://github.com/real-stanford/universal_manipulation_interface)
-and [Data Scaling Laws](https://github.com/Fanqi-Lin/Data-Scaling-Laws).
-Thanks for their great work!
-
-## 🔗 Citation
-If you find our work useful, please consider citing:
+```bash
+git clone --single-branch --branch flow https://github.com/zhuolifeng/frequency_adaptive_policy.git
+cd frequency_adaptive_policy
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install torch==2.2.2 torchvision==0.17.2 \
+    --index-url https://download.pytorch.org/whl/cu121
+python -m pip install -r requirements-training.txt
 ```
+
+Inspect the resolved iMeanFlow configuration before supplying a dataset. This command prints the model, task and training settings and exits before training.
+
+```bash
+python train.py --config-name=train_dp_30hz_imeanflow_workspace \
+    task=real_dual_switch_image_wrench_offline_10fps_30hz --cfg job --resolve
+```
+
+The CPU tests train and validate a reduced iMeanFlow model on two synthetic episodes, save a checkpoint, and check replay-buffer I/O, camera image resizing and mocked robot connections. Run them from the repository root.
+
+```bash
+python -m pip install pytest
+python -m pytest -q
+```
+
+## Prepare demonstrations
+
+The training loader expects `DATASET_PATH` to name a **directory containing** `replay_buffer.zarr`. For example, the dual-switch task uses `data/external_img`, `data/right_wrist_img`, `data/right_robot_tcp_pose`, `data/right_robot_tcp_wrench`, `data/right_robot_tcp_wrench_stack`, `data/action`, `data/action_stack` and `meta/episode_ends` inside the store. The 30 Hz store groups three force samples and three action targets with each 10 Hz observation. Check the task's `shape_meta` when preparing another dataset. [Dual-switch task configuration](ImplicitRDP/config/task/real_dual_switch_image_wrench_offline_10fps_30hz.yaml)
+
+For raw-data preprocessing, install the additional dependencies with `python -m pip install -r requirements.txt`. To convert numbered recording files such as `data/dual_switch_v1_round_1/0.pkl`, use the action representation expected by the task. This example writes `data/dual_switch_v1_round_1_zarr/replay_buffer.zarr`.
+
+```bash
+python post_process_data.py --data-root data --tag dual_switch_v1_round_1 \
+    --action_type right_arm_6DOF_virtual_target_stiffness
+```
+
+Supply recordings or a prepared Zarr store for your experiment. The original ImplicitRDP release provides datasets and checkpoints for its own tasks. Match the observation keys, action representation and sampling rates before reusing them. [Upstream datasets](https://huggingface.co/datasets/WendiChen/ImplicitRDP_dataset) · [Upstream checkpoints](https://huggingface.co/WendiChen/ImplicitRDP_model)
+
+## Train
+
+For a single-GPU run on dual-switch data, set the task and dataset once. Choose one launcher from the table.
+
+```bash
+export TASK=dual_switch
+export DATASET_PATH="$PWD/data/dual_switch_v1_round_1_zarr"
+export GPU_ID=0
+```
+
+| Policy | Command | What it trains |
+| --- | --- | --- |
+| Frequency-adaptive diffusion | `bash train_dp_multifreq_cd_30hz_confidence.sh` | Fits the diffusion backbone, trains the confidence predictor, then distills the 30 Hz head. Set `STAGE2_DATASET_PATH` to use separate calibration data. |
+| 30 Hz iMeanFlow | `bash train_dp_30hz_imeanflow.sh` | Learns a flow model with one inference step by default. |
+| 30 Hz consistency | `bash train_dp_30hz_consistency.sh` | Trains the base model and then the consistency model. |
+| 30 Hz ACT | `bash train_act_30hz.sh` | Trains a transformer to predict an action sequence. |
+
+Use one GPU to reproduce these examples. The launcher accepts multiple GPU IDs, but some workspaces compute losses on an unwrapped model and distributed gradient synchronization is unverified.
+
+Hydra writes runs under `data/outputs/<date>/`. Checkpoints live in the run's `checkpoints/` directory. To adjust the batch size, append Hydra overrides such as `dataloader.batch_size=8 val_dataloader.batch_size=8`. [Workspace configurations](ImplicitRDP/config)
+
+## Evaluate
+
+To evaluate a trained frequency-adaptive checkpoint on recorded demonstrations, set the path to a checkpoint from the corresponding workspace. This example evaluates the full store specified by `DATASET_PATH`. For held-out results, point it to a separate evaluation store.
+
+```bash
+CKPT_PATH=/path/to/checkpoints/latest.ckpt TRAINING_STAGE=auto \
+    OUTPUT_DIR=results/dual_switch bash eval_dp_multifreq_cd_30hz_confidence.sh
+```
+
+The evaluator scores both frequencies against the corresponding demonstration actions. It writes per-episode mean squared errors for the first six action dimensions to `all_episodes_metrics.json` alongside the generated videos. Use the same task, prediction type and loss type as the training run. [Offline evaluator](eval_dp_multifreq_cd_30hz_confidence.py)
+
+For live evaluation or recording, configure the robot and cameras on the deployment workstation first. The deployment guide covers ROS 2, calibration, service startup and selecting a trained checkpoint. [Deployment guide](docs/customized_deployment_guide.md) · [Data collection tips](docs/data_collection_tips.md)
+
+## License and attribution
+
+This code derives from the `flow` branch of Chen-Wendi's frequency-adaptive policy repository and the ImplicitRDP project by Wendi Chen and collaborators. The repository license includes the original copyright and third-party notices. [Source repository](https://github.com/Chen-Wendi/frequency_adaptive_policy) · [License](LICENSE)
+
+ImplicitRDP also builds on [Reactive Diffusion Policy](https://github.com/xiaoxiaoxh/reactive_diffusion_policy), [Diffusion Policy](https://github.com/real-stanford/diffusion_policy), [VQ-BeT](https://github.com/jayLEE0301/vq_bet_official), [Stable Diffusion](https://github.com/CompVis/stable-diffusion), [UMI](https://github.com/real-stanford/universal_manipulation_interface) and [Data Scaling Laws](https://github.com/Fanqi-Lin/Data-Scaling-Laws).
+
+If you use the upstream methods, cite the corresponding papers.
+
+```bibtex
 @article{chen2025implicitrdp,
   title     = {ImplicitRDP: An End-to-End Visual-Force Diffusion Policy with Structural Slow-Fast Learning},
   author    = {Chen, Wendi and Xue, Han and Wang, Yi and Zhou, Fangyuan and Lv, Jun and Jin, Yang and Tang, Shirun and Wen, Chuan and Lu, Cewu},

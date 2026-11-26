@@ -1,54 +1,37 @@
-numpy==1.26.4
-numba
-scipy
-opencv-python
+-r requirements-training.txt
+
+# Additional dependencies for baselines, preprocessing, and robot deployment.
+av
+boto3
+bson
 cffi
-ipykernel
-matplotlib
-zarr
-numcodecs
-h5py
-hydra-core
-einops
-tqdm
-dill
-scikit-video
-scikit-image
-pymunk
-wandb
-threadpoolctl
-shapely
+click
+cmake
 cython
+datasets
+fastapi
+h5py
 imageio
 imageio-ffmpeg
-termcolor
-tensorboard
-tensorboardx
-psutil
-click
-boto3
-accelerate
-datasets
-diffusers==0.33.1
-av
-cmake
-timm
-peft
-fastapi
-uvicorn
-pyrealsense2
-pydantic
-loguru
-bson
+ipykernel
 open3d
-transforms3d
-pyinstrument
+# LoRA baselines use the Hugging Face stack compatible with PyTorch 2.2.
+peft==0.14.0
+transformers==4.46.3
+psutil
 py_cli_interaction
 pygame
-#rerun-sdk
+pyinstrument
+pymunk
 pynput
-pyudev
-# flexivrdk==1.7.0
-# install this by yourself
-# torch==2.2.2
-# torchvision==0.17.2
+pyrealsense2; sys_platform == 'linux'
+pyudev; sys_platform == 'linux'
+rerun-sdk
+scikit-image
+scikit-learn
+scikit-video
+requests
+shapely
+tensorboardx
+termcolor
+uvicorn

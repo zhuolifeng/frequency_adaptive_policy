@@ -13,7 +13,7 @@ import tqdm
 from loguru import logger
 from omegaconf import OmegaConf
 
-from ImplicitRDP.common.pytorch_util import dict_apply
+from ImplicitRDP.common.offline_evaluation import group_episode_batches
 from ImplicitRDP.policy.dp_multifreq_cd_30hz_confidence_policy import (
     DPMultiFreqCD30HzConfidencePolicy,
 )
@@ -153,7 +153,7 @@ def main(cfg):
     )
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill)
+    payload = torch.load(ckpt_path, map_location="cpu", pickle_module=dill)
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg)
     workspace.load_payload(
@@ -194,30 +194,8 @@ def main(cfg):
     episode_ends = replay_buffer.episode_ends[:]
     n_episodes = len(episode_ends)
 
-    episode_data = [[] for _ in range(n_episodes)]
-    sampler = val_dataset.sampler
-    for data_idx in tqdm.tqdm(range(len(val_dataset)), desc="Loading data"):
-        episode_idx = sampler.indices_to_episode_idx[data_idx]
-        sample = val_dataset[data_idx]
-        sample_batch = dict_apply(
-            sample,
-            lambda x: x.unsqueeze(0).to(device, non_blocking=True)
-            if isinstance(x, torch.Tensor)
-            else x,
-        )
-        if "obs" in sample and isinstance(sample["obs"], dict):
-            sample_batch["obs"] = {
-                k: v.unsqueeze(0).to(device, non_blocking=True)
-                for k, v in sample["obs"].items()
-                if isinstance(v, torch.Tensor)
-            }
-        if "extended_obs" in sample and isinstance(sample["extended_obs"], dict):
-            sample_batch["extended_obs"] = {
-                k: v.unsqueeze(0).to(device, non_blocking=True)
-                for k, v in sample["extended_obs"].items()
-                if isinstance(v, torch.Tensor)
-            }
-        episode_data[episode_idx].append(sample_batch)
+    episode_data = group_episode_batches(val_dataset, device)
+
 
     episode_ranges = []
     start = 0
@@ -225,7 +203,7 @@ def main(cfg):
         episode_ranges.append((start, int(end)))
         start = int(end)
 
-    force_keys = sorted([k for k in replay_buffer.keys() if "wrench" in k.lower()])
+    force_keys = sorted(k for k in replay_buffer.keys() if k.endswith("_tcp_wrench"))
     episode_force_data_list = [None] * n_episodes
     if len(force_keys) > 0:
         all_force_data = {fk: replay_buffer[fk][:] for fk in force_keys if fk in replay_buffer}
